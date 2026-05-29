@@ -62,11 +62,10 @@ class DOTA(nn.Module):
                 delta_per_class = torch.sum(weighted_sq_diff, dim=0)
                 self.sigma2 = (self.c.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
 
-                # Global diagonal variance = class-weighted average (stable like original overall_Sigma)
-                self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
-
             self.mu = new_mu
             self.c = new_c
+
+            self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
     def update(self):
         # α_k = c_k / (c_k + τ): early → rely on global; later → activate per-class
