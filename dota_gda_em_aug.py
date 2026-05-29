@@ -32,19 +32,12 @@ class DOTA(nn.Module):
         self.num_classes = num_classes
         self.streaming_update_Sigma = streaming_update_Sigma
         self.epsilon = cfg['epsilon']
-        self.tau = cfg.get('tau', 50.0)
-        self.c_sigma_init = cfg.get('c_sigma_init', 50.0)
+        self.tau = cfg.get('tau', 10000.0)
         self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
-
-        # Full per-class covariance (C, D, D)
-        self.Sigma = cfg['sigma'] * torch.eye(input_shape, dtype=torch.float32).repeat(num_classes, 1, 1).to(self.device)
-        self.overall_Sigma = torch.mean(self.Sigma, dim=0)
-        self.Lambda = torch.pinverse(self.overall_Sigma.double()).to(self.device).half()
-        # Separate warm-up counter for Sigma — prevents cold-start spike
-        self.c_sigma = torch.full((num_classes,), self.c_sigma_init, dtype=torch.float32).to(self.device)
-
-        self.delta_precision = torch.zeros(num_classes, input_shape, dtype=torch.float16).to(self.device)
+        self.sigma2 = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32).to(self.device)
+        self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
+        self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
 
     def fit(self, x, y):
         x = x.to(self.device)
@@ -57,44 +50,27 @@ class DOTA(nn.Module):
 
             if self.streaming_update_Sigma:
                 x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
-                weighted_x_minus_mu = y.unsqueeze(2) * x_minus_mu
-                delta = torch.einsum('bji,bjk->jik', weighted_x_minus_mu, x_minus_mu)
-                self.Sigma = (self.c_sigma[:, None, None] * self.Sigma + delta) / (self.c_sigma[:, None, None] + sum_weights[:, None, None].clamp(min=1e-8))
-                self.c_sigma = self.c_sigma + sum_weights
+                sq_diff = x_minus_mu * x_minus_mu
+                weighted_sq_diff = y.unsqueeze(2) * sq_diff
+                delta_per_class = torch.sum(weighted_sq_diff, dim=0)
+                self.sigma2 = (self.c.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
 
-            self.overall_Sigma = torch.mean(self.Sigma, dim=0)
             self.mu = new_mu
             self.c = new_c
+            self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
     def update(self):
-        self.Lambda = torch.inverse(
-            (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.input_shape).to(self.device)
-        ).half()
-
-        precision_global = torch.diag(self.Lambda.float())
-
-        sigma2_diag = torch.diagonal(self.Sigma, dim1=1, dim2=2)
-        precision_raw = 1.0 / (sigma2_diag + self.epsilon)
-
         alpha = self.c / (self.c + self.tau)
-        precision_shrunk = (1 - alpha).unsqueeze(1) * precision_global.unsqueeze(0) + alpha.unsqueeze(1) * precision_raw
-
-        self.delta_precision = (precision_shrunk - precision_global.unsqueeze(0)).half()
+        sigma2_shrunk = (1 - alpha).unsqueeze(1) * self.sigma2_global.unsqueeze(0) + alpha.unsqueeze(1) * self.sigma2
+        self.precision = (1.0 / (sigma2_shrunk + self.epsilon)).half()
 
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            M = self.mu.transpose(1, 0).half()
-
-            W = torch.matmul(self.Lambda, M)
-            c = 0.5 * torch.sum(M * W, dim=0)
-            scores = torch.matmul(X.half(), W) - c
-
-            W_delta = self.delta_precision.T * M
-            delta_term = torch.matmul(X.half(), W_delta)
-            delta_bias = 0.5 * torch.sum(self.delta_precision * (M.T * M.T), dim=1)
-            scores = scores + delta_term - delta_bias
-
+            M = self.mu.half()
+            W = self.precision * M
+            c = 0.5 * torch.sum(M * W, dim=1)
+            scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
             return scores.float()
 
 def get_arguments():

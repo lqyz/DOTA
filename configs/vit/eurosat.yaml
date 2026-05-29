@@ -4,5 +4,4 @@ epsilon: 0.0001
 sigma: 0.002
 eta: 3
 rho: 0.05
-tau: 50.0
-c_sigma_init: 50.0
+tau: 10000.0
