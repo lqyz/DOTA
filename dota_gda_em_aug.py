@@ -32,49 +32,65 @@ class DOTA(nn.Module):
         self.num_classes = num_classes
         self.streaming_update_Sigma = streaming_update_Sigma
         self.epsilon = cfg['epsilon']
+        self.tau = cfg.get('tau', 5.0)  # shrinkage strength: larger τ → slower activation of per-class variance
         self.mu = clip_weights.T.to(self.device)  # initialize mu with clip_weights
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
-        self.Sigma = cfg['sigma'] * torch.eye(input_shape, dtype=torch.float32).repeat(num_classes, 1, 1).to(self.device)
-        self.overall_Sigma = torch.mean(self.Sigma, dim=0)
-        self.Lambda = torch.pinverse(self.overall_Sigma.double()).to(self.device).half()
 
-    # Update the covariance and the mean for the corresponding category
+        # Per-class diagonal variance (C, D)
+        self.sigma2 = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32).to(self.device)
+        # Global diagonal variance (D,)
+        self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
+        # Global running mean and count
+        self.mu_global = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
+        self.c_global = torch.tensor(0.0, dtype=torch.float32).to(self.device)
+
+        # Initial precision from global variance
+        self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
+
     def fit(self, x, y):
         x = x.to(self.device)
-        y = y.to(self.device)  # y is now a probability distribution (soft labels)
+        y = y.to(self.device)
         with torch.no_grad():
-            sum_weights = torch.sum(y, dim=0)  
-            weighted_x = torch.matmul(y.T, x)  
-            new_mu = (weighted_x + self.c.unsqueeze(1) * self.mu) / (sum_weights.unsqueeze(1) + self.c.unsqueeze(1)) 
+            batches = x.size(0)
+            sum_weights = torch.sum(y, dim=0)
+            weighted_x = torch.matmul(y.T, x)
+            new_mu = (weighted_x + self.c.unsqueeze(1) * self.mu) / (sum_weights.unsqueeze(1) + self.c.unsqueeze(1))
             new_c = self.c + sum_weights
 
-            # Update the covariance matrix for each category
             if self.streaming_update_Sigma:
-                x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)  # Shape: (batch_size, num_classes, input_shape)
-                weighted_x_minus_mu = y.unsqueeze(2) * x_minus_mu  # Shape: (batch_size, num_classes, input_shape)
-                delta = torch.einsum('bji,bjk->jik', weighted_x_minus_mu, x_minus_mu)  # Shape: (num_classes, input_shape, input_shape)
-                self.Sigma = (self.c[:, None, None] * self.Sigma + delta) / (self.c[:, None, None] + sum_weights[:, None, None])
+                # Per-class diagonal variance (C, D)
+                x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
+                sq_diff = x_minus_mu * x_minus_mu
+                weighted_sq_diff = y.unsqueeze(2) * sq_diff
+                delta_per_class = torch.sum(weighted_sq_diff, dim=0)
+                self.sigma2 = (self.c.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
 
-            # Update the total covariance matrix, mean matrix, and count sections
-            self.overall_Sigma = torch.mean(self.Sigma, dim=0)
+                # Global diagonal variance (D,) — unconditional, tracks overall noise
+                x_minus_global = x - self.mu_global.unsqueeze(0)
+                sq_diff_global = (x_minus_global * x_minus_global).sum(dim=0)
+                self.sigma2_global = (self.c_global * self.sigma2_global + sq_diff_global) / (self.c_global + batches)
+
+                # Global running mean
+                batch_mean = x.mean(dim=0)
+                self.mu_global = (batches * batch_mean + self.c_global * self.mu_global) / (self.c_global + batches)
+                self.c_global = self.c_global + batches
+
             self.mu = new_mu
             self.c = new_c
-            
-    # Update the inverse matrix to include a small identity matrix when calculating the inverse matrix to ensure that it is full rank
-    def update(self):
-        self.Lambda = torch.inverse(
-            (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.input_shape).to(
-            self.device)).half()
 
-    # Calculate the results of Dota predictions
+    def update(self):
+        # α_k = c_k / (c_k + τ): early → rely on global; later → activate per-class
+        alpha = self.c / (self.c + self.tau)
+        sigma2_shrunk = (1 - alpha).unsqueeze(1) * self.sigma2_global.unsqueeze(0) + alpha.unsqueeze(1) * self.sigma2
+        self.precision = (1.0 / (sigma2_shrunk + self.epsilon)).half()
+
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            Lambda = self.Lambda
             M = self.mu.transpose(1, 0).half()
-            W = torch.matmul(Lambda, M)  
-            c = 0.5 * torch.sum(M * W, dim=0)
-            scores = torch.matmul(X, W) - c
+            diff = X.half().unsqueeze(1) - M.unsqueeze(0)
+            mahalanobis = torch.sum(self.precision.unsqueeze(0) * diff * diff, dim=2)
+            scores = -0.5 * mahalanobis.float()
             return scores
 
 def get_arguments():
