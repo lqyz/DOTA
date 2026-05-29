@@ -32,16 +32,18 @@ class DOTA(nn.Module):
         self.num_classes = num_classes
         self.streaming_update_Sigma = streaming_update_Sigma
         self.epsilon = cfg['epsilon']
-        self.tau = cfg.get('tau', 5.0)  # shrinkage strength: larger τ → slower activation of per-class variance
-        self.mu = clip_weights.T.to(self.device)  # initialize mu with clip_weights
+        self.tau = cfg.get('tau', 50.0)
+        self.c_sigma_init = cfg.get('c_sigma_init', 50.0)
+        self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
 
         # Per-class diagonal variance (C, D)
         self.sigma2 = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32).to(self.device)
-        # Global diagonal variance (D,) — class-weighted average of sigma2
+        # Global diagonal variance (D,)
         self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
+        # Separate variance counter — starts high so sigma2 stays near init until ~50 samples per class
+        self.c_sigma = torch.full((num_classes,), self.c_sigma_init, dtype=torch.float32).to(self.device)
 
-        # Initial precision from global variance
         self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
 
     def fit(self, x, y):
@@ -55,12 +57,12 @@ class DOTA(nn.Module):
             new_c = self.c + sum_weights
 
             if self.streaming_update_Sigma:
-                # Per-class diagonal variance (C, D)
                 x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
                 sq_diff = x_minus_mu * x_minus_mu
                 weighted_sq_diff = y.unsqueeze(2) * sq_diff
                 delta_per_class = torch.sum(weighted_sq_diff, dim=0)
-                self.sigma2 = (self.c.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
+                self.sigma2 = (self.c_sigma.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c_sigma.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
+                self.c_sigma = self.c_sigma + sum_weights
 
             self.mu = new_mu
             self.c = new_c
@@ -68,7 +70,6 @@ class DOTA(nn.Module):
             self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
     def update(self):
-        # α_k = c_k / (c_k + τ): early → rely on global; later → activate per-class
         alpha = self.c / (self.c + self.tau)
         sigma2_shrunk = (1 - alpha).unsqueeze(1) * self.sigma2_global.unsqueeze(0) + alpha.unsqueeze(1) * self.sigma2
         self.precision = (1.0 / (sigma2_shrunk + self.epsilon)).half()
@@ -77,8 +78,7 @@ class DOTA(nn.Module):
         X = X.to(self.device)
         with torch.no_grad():
             M = self.mu.half()
-            precision = self.precision
-            W = precision * M
+            W = self.precision * M
             c = 0.5 * torch.sum(M * W, dim=1)
             scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
             return scores.float()
