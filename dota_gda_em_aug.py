@@ -64,21 +64,19 @@ class DOTA(nn.Module):
             self.c = new_c
 
     def update(self):
-        # Global full precision (preserves off-diagonal correlations)
         self.Lambda = torch.inverse(
             (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.input_shape).to(self.device)
         ).half()
 
-        # Per-class diagonal precision from Sigma with shrinkage
-        sigma2_diag = torch.diagonal(self.Sigma, dim1=1, dim2=2)
-        sigma2_diag_global = torch.sum(self.c.unsqueeze(1) * sigma2_diag, dim=0) / self.c.sum()
-
-        alpha = self.c / (self.c + self.tau)
-        sigma2_shrunk = (1 - alpha).unsqueeze(1) * sigma2_diag_global.unsqueeze(0) + alpha.unsqueeze(1) * sigma2_diag
-        precision_local = 1.0 / (sigma2_shrunk + self.epsilon)
         precision_global = torch.diag(self.Lambda.float())
 
-        self.delta_precision = (precision_local - precision_global.unsqueeze(0)).half()
+        sigma2_diag = torch.diagonal(self.Sigma, dim1=1, dim2=2)
+        precision_raw = 1.0 / (sigma2_diag + self.epsilon)
+
+        alpha = self.c / (self.c + self.tau)
+        precision_shrunk = (1 - alpha).unsqueeze(1) * precision_global.unsqueeze(0) + alpha.unsqueeze(1) * precision_raw
+
+        self.delta_precision = (precision_shrunk - precision_global.unsqueeze(0)).half()
 
     def predict(self, X):
         X = X.to(self.device)
