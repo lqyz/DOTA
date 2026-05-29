@@ -88,10 +88,11 @@ class DOTA(nn.Module):
         X = X.to(self.device)
         with torch.no_grad():
             M = self.mu.half()
-            diff = X.half().unsqueeze(1) - M.unsqueeze(0)
-            mahalanobis = torch.sum(self.precision.unsqueeze(0) * diff * diff, dim=2)
-            scores = -0.5 * mahalanobis.float()
-            return scores
+            precision = self.precision
+            W = precision * M
+            c = 0.5 * torch.sum(M * W, dim=1)
+            scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
+            return scores.float()
 
 def get_arguments():
     """Get arguments of the test-time adaptation."""
