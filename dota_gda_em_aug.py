@@ -87,7 +87,7 @@ class DOTA(nn.Module):
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            M = self.mu.transpose(1, 0).half()
+            M = self.mu.half()
             diff = X.half().unsqueeze(1) - M.unsqueeze(0)
             mahalanobis = torch.sum(self.precision.unsqueeze(0) * diff * diff, dim=2)
             scores = -0.5 * mahalanobis.float()
