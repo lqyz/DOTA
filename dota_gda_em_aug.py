@@ -38,11 +38,8 @@ class DOTA(nn.Module):
 
         # Per-class diagonal variance (C, D)
         self.sigma2 = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32).to(self.device)
-        # Global diagonal variance (D,)
+        # Global diagonal variance (D,) — class-weighted average of sigma2
         self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
-        # Global running mean and count
-        self.mu_global = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
-        self.c_global = torch.tensor(0.0, dtype=torch.float32).to(self.device)
 
         # Initial precision from global variance
         self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
@@ -65,15 +62,8 @@ class DOTA(nn.Module):
                 delta_per_class = torch.sum(weighted_sq_diff, dim=0)
                 self.sigma2 = (self.c.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
 
-                # Global diagonal variance (D,) — unconditional, tracks overall noise
-                x_minus_global = x - self.mu_global.unsqueeze(0)
-                sq_diff_global = (x_minus_global * x_minus_global).sum(dim=0)
-                self.sigma2_global = (self.c_global * self.sigma2_global + sq_diff_global) / (self.c_global + batches)
-
-                # Global running mean
-                batch_mean = x.mean(dim=0)
-                self.mu_global = (batches * batch_mean + self.c_global * self.mu_global) / (self.c_global + batches)
-                self.c_global = self.c_global + batches
+                # Global diagonal variance = class-weighted average (stable like original overall_Sigma)
+                self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
             self.mu = new_mu
             self.c = new_c
