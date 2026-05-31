@@ -33,11 +33,17 @@ class DOTA(nn.Module):
         self.streaming_update_Sigma = streaming_update_Sigma
         self.epsilon = cfg['epsilon']
         self.tau = cfg.get('tau', 10000.0)
-        self.mu = clip_weights.T.to(self.device)
+        self.tau_mu = cfg.get('tau_mu', 50.0)
+        self.mu_text = clip_weights.T.clone().to(self.device)
+        self.mu_image = clip_weights.T.clone().to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
         self.sigma2 = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32).to(self.device)
         self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
         self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
+
+    def _blend_mu(self):
+        beta = self.c / (self.c + self.tau_mu)
+        return (1 - beta).unsqueeze(1) * self.mu_text + beta.unsqueeze(1) * self.mu_image
 
     def fit(self, x, y):
         x = x.to(self.device)
@@ -45,17 +51,19 @@ class DOTA(nn.Module):
         with torch.no_grad():
             sum_weights = torch.sum(y, dim=0)
             weighted_x = torch.matmul(y.T, x)
-            new_mu = (weighted_x + self.c.unsqueeze(1) * self.mu) / (sum_weights.unsqueeze(1) + self.c.unsqueeze(1))
+
+            mu_eff = self._blend_mu()
+            new_mu_image = (weighted_x + self.c.unsqueeze(1) * self.mu_image) / (sum_weights.unsqueeze(1) + self.c.unsqueeze(1))
             new_c = self.c + sum_weights
 
             if self.streaming_update_Sigma:
-                x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
+                x_minus_mu = x.unsqueeze(1) - mu_eff.unsqueeze(0)
                 sq_diff = x_minus_mu * x_minus_mu
                 weighted_sq_diff = y.unsqueeze(2) * sq_diff
                 delta_per_class = torch.sum(weighted_sq_diff, dim=0)
                 self.sigma2 = (self.c.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
 
-            self.mu = new_mu
+            self.mu_image = new_mu_image
             self.c = new_c
             self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
@@ -67,7 +75,7 @@ class DOTA(nn.Module):
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            M = self.mu.half()
+            M = self._blend_mu().half()
             W = self.precision * M
             c = 0.5 * torch.sum(M * W, dim=1)
             scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
