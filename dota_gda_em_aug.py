@@ -40,6 +40,12 @@ class DOTA(nn.Module):
         self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
         self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
 
+        self.gamma = cfg.get('gamma', 1.0)
+        self.channel_sum = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
+        self.channel_sum_sq = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
+        self.channel_count = 0
+        self.channel_weights = torch.ones(input_shape, dtype=torch.float32).to(self.device).half()
+
     def fit(self, x, y):
         x = x.to(self.device)
         y = y.to(self.device)
@@ -49,6 +55,22 @@ class DOTA(nn.Module):
                 y_filt = torch.zeros_like(y)
                 y_filt.scatter_(1, topk_idx, y.gather(1, topk_idx))
                 y = y_filt / y_filt.sum(dim=1, keepdim=True).clamp(min=1e-8)
+
+            current_sample = x.mean(0)
+            self.channel_count += 1
+            self.channel_sum += current_sample
+            self.channel_sum_sq += current_sample ** 2
+
+            if self.channel_count > 5:
+                global_mean = self.channel_sum / self.channel_count
+                global_var = (self.channel_sum_sq / self.channel_count) - (global_mean ** 2)
+                global_var = torch.clamp(global_var, min=1e-8)
+
+                relative_var = global_var / (global_var.median() + 1e-8)
+                self.channel_weights = torch.exp(-relative_var / self.gamma).half()
+                self.channel_weights = torch.clamp(self.channel_weights, min=0.1, max=1.0)
+
+            x = x * self.channel_weights.unsqueeze(0).float()
 
             sum_weights = torch.sum(y, dim=0)
             weighted_x = torch.matmul(y.T, x)
@@ -74,10 +96,12 @@ class DOTA(nn.Module):
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
+            X_masked = X.half() * self.channel_weights.unsqueeze(0)
+
             M = self.mu.half()
             W = self.precision * M
             c = 0.5 * torch.sum(M * W, dim=1)
-            scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
+            scores = torch.matmul(X_masked, W.T) - c.unsqueeze(0)
             return scores.float()
 
 def get_arguments():
@@ -95,29 +119,21 @@ def get_arguments():
 def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
     recent_sample_count = 1000
     fusion_accuracies = []
-    # It is used to store the maximum value of each sample feature and sort it to determine whether it is a sample with high uncertainty
-    # Initialize the unconfident detector, gamma is the proportion of the true label obtained
     with torch.no_grad():
         for i, (images, target) in enumerate(tqdm(loader, desc='Processed test images: ')):
-             # When data augmentation is used, the top 10% of enhanced images are selected to train the model
             image_features, clip_logits, loss, prob_map, pred = get_clip_logits_aug(images, clip_model, clip_weights)
             pred, target, prop_entropy = torch.tensor(pred).cuda(), target.cuda(), get_entropy(loss, clip_weights)
             dota_logits = dota_model.predict(image_features.mean(0).unsqueeze(0))
 
-            # Choose a smaller weight, so that model relies more on the original clip initially
-            dota_weights = torch.clamp(params['rho'] * dota_model.c.mean() / image_features.size(0), max=params['eta'])   
-            # Clip and Dota prediction weights are added to form the final prediction
+            dota_weights = torch.clamp(params['rho'] * dota_model.c.mean() / image_features.size(0), max=params['eta'])
             final_logits = clip_logits + dota_weights*dota_logits
 
-            # Calculate the prediction accuracy of mixed weights, dota weights, clip weights and add them to the list
             fusion_acc = cls_acc(final_logits, target)
             fusion_accuracies.append(fusion_acc)
 
             dota_model.fit(image_features, prob_map)
+            dota_model.update()
 
-            # Update the inverse matrix
-            dota_model.update()                
-            # Print the information
             if (i + 1) % recent_sample_count == 0:
                 recent_fusion_accuracy = sum(fusion_accuracies[-recent_sample_count:]) / recent_sample_count
                 logger.info(
@@ -141,17 +157,14 @@ def main():
     clip_model.eval()
     datasets = args.datasets.split('/')
     for dataset_name in datasets:
-        # Set random seed
         setup_seeds(1)
-        # Prepare logs and other content to facilitate printout information
         date = datetime.now().strftime("%b%d_%H-%M-%S")
-        backbone_safe = args.backbone.replace('/', '_') 
+        backbone_safe = args.backbone.replace('/', '_')
         group_name = f"{backbone_safe}_{dataset_name}_{date}"
         logging.basicConfig(filename=os.path.join(args.log_path, group_name), level=logging.INFO, format='%(asctime)s %(message)s')
-        logger = logging.getLogger()        
+        logger = logging.getLogger()
         logger.info(f"Processing {dataset_name} dataset.")
 
-        # Obtain the hyperparameter information of the dataset
         cfg = get_config_file(config_path, dataset_name)
         logger.info("\nRunning dataset configurations:")
         logger.info(cfg)
@@ -168,4 +181,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
