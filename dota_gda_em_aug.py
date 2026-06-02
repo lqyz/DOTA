@@ -96,7 +96,7 @@ class DOTA(nn.Module):
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            X_masked = X.float() * self.channel_weights.unsqueeze(0)
+            X_masked = X.half() * self.channel_weights.half().unsqueeze(0)
 
             M = self.mu.half()
             W = self.precision * M
