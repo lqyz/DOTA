@@ -47,8 +47,8 @@ class DOTA(nn.Module):
         self.channel_weights = torch.ones(input_shape, dtype=torch.float32).to(self.device)
 
     def fit(self, x, y):
-        x = x.to(self.device)
-        y = y.to(self.device)
+        x = x.float().to(self.device)
+        y = y.float().to(self.device)
         with torch.no_grad():
             if self.top_k is not None:
                 _, topk_idx = y.topk(self.top_k, dim=1)
@@ -56,7 +56,7 @@ class DOTA(nn.Module):
                 y_filt.scatter_(1, topk_idx, y.gather(1, topk_idx))
                 y = y_filt / y_filt.sum(dim=1, keepdim=True).clamp(min=1e-8)
 
-            current_sample = x.mean(0).float()
+            current_sample = x.mean(0)
             self.channel_count += 1
             self.channel_sum += current_sample
             self.channel_sum_sq += current_sample ** 2
@@ -70,7 +70,7 @@ class DOTA(nn.Module):
                 self.channel_weights = torch.exp(-relative_var / self.gamma)
                 self.channel_weights = torch.clamp(self.channel_weights, min=0.1, max=1.0)
 
-            x = x.float() * self.channel_weights.unsqueeze(0)
+            x = x * self.channel_weights.unsqueeze(0)
 
             sum_weights = torch.sum(y, dim=0)
             weighted_x = torch.matmul(y.T, x)
