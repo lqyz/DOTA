@@ -6,4 +6,5 @@ eta: 0.3
 rho: 0.0025
 tau: 10000.0
 top_k: 5
-gamma: 1.0
+max_drift: 0.1
+beta: 0.1

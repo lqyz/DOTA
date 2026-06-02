@@ -40,11 +40,9 @@ class DOTA(nn.Module):
         self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
         self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
 
-        self.gamma = cfg.get('gamma', 1.0)
-        self.channel_sum = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
-        self.channel_sum_sq = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
-        self.channel_count = 0
-        self.channel_weights = torch.ones(input_shape, dtype=torch.float32).to(self.device)
+        self.mu_zero = self.mu.clone()
+        self.max_drift = cfg.get('max_drift', 0.1)
+        self.beta = cfg.get('beta', 0.1)
 
     def fit(self, x, y):
         x = x.float().to(self.device)
@@ -55,22 +53,6 @@ class DOTA(nn.Module):
                 y_filt = torch.zeros_like(y)
                 y_filt.scatter_(1, topk_idx, y.gather(1, topk_idx))
                 y = y_filt / y_filt.sum(dim=1, keepdim=True).clamp(min=1e-8)
-
-            current_sample = x.mean(0)
-            self.channel_count += 1
-            self.channel_sum += current_sample
-            self.channel_sum_sq += current_sample ** 2
-
-            if self.channel_count > 5:
-                global_mean = self.channel_sum / self.channel_count
-                global_var = (self.channel_sum_sq / self.channel_count) - (global_mean ** 2)
-                global_var = torch.clamp(global_var, min=1e-8)
-
-                relative_var = global_var / (global_var.median() + 1e-8)
-                self.channel_weights = torch.exp(-relative_var / self.gamma)
-                self.channel_weights = torch.clamp(self.channel_weights, min=0.1, max=1.0)
-
-            x = x * self.channel_weights.unsqueeze(0)
 
             sum_weights = torch.sum(y, dim=0)
             weighted_x = torch.matmul(y.T, x)
@@ -88,6 +70,11 @@ class DOTA(nn.Module):
             self.c = new_c
             self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
+            dist_to_anchor = torch.norm(self.mu - self.mu_zero, p=2, dim=1)
+            over_drift_mask = dist_to_anchor > self.max_drift
+            if over_drift_mask.any():
+                self.mu[over_drift_mask] = (1.0 - self.beta) * self.mu[over_drift_mask] + self.beta * self.mu_zero[over_drift_mask]
+
     def update(self):
         alpha = self.c / (self.c + self.tau)
         sigma2_shrunk = (1 - alpha).unsqueeze(1) * self.sigma2_global.unsqueeze(0) + alpha.unsqueeze(1) * self.sigma2
@@ -96,12 +83,10 @@ class DOTA(nn.Module):
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            X_masked = X.half() * self.channel_weights.half().unsqueeze(0)
-
             M = self.mu.half()
             W = self.precision * M
             c = 0.5 * torch.sum(M * W, dim=1)
-            scores = torch.matmul(X_masked, W.T) - c.unsqueeze(0)
+            scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
             return scores.float()
 
 def get_arguments():
