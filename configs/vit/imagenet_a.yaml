@@ -6,5 +6,4 @@ eta: 0.5
 rho: 0.02
 tau: 10000.0
 top_k: 5
-rank: 8
-lr_oj: 0.01
+block_groups: 8

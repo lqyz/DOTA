@@ -34,17 +34,15 @@ class DOTA(nn.Module):
         self.epsilon = cfg['epsilon']
         self.tau = cfg.get('tau', 10000.0)
         self.top_k = cfg.get('top_k', None)
-        self.rank = cfg.get('rank', 8)
-        self.lr_oj = cfg.get('lr_oj', 0.01)
+        self.G = cfg.get('block_groups', 8)
+        self.B = input_shape // self.G
+
         self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
-        self.sigma2 = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32).to(self.device)
-        self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
-        self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
-
-        self.L = torch.randn(input_shape, self.rank, dtype=torch.float32).to(self.device)
-        self.L /= torch.norm(self.L, dim=0, keepdim=True)
-        self.LM = torch.zeros(num_classes, self.rank, dtype=torch.float16).to(self.device)
+        self.Sigma = cfg['sigma'] * torch.eye(self.B, dtype=torch.float32).repeat(num_classes, self.G, 1, 1).to(self.device)
+        self.overall_Sigma = torch.mean(self.Sigma, dim=0)
+        reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
+        self.Lambda = torch.inverse(reg.double()).to(self.device).half()
 
     def fit(self, x, y):
         x = x.to(self.device)
@@ -63,39 +61,29 @@ class DOTA(nn.Module):
 
             if self.streaming_update_Sigma:
                 x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
-                sq_diff = x_minus_mu * x_minus_mu
-                weighted_sq_diff = y.unsqueeze(2) * sq_diff
-                delta_per_class = torch.sum(weighted_sq_diff, dim=0)
-                self.sigma2 = (self.c.unsqueeze(1) * self.sigma2 + delta_per_class) / (self.c.unsqueeze(1) + sum_weights.unsqueeze(1).clamp(min=1e-8))
+                x_mm_blocks = x_minus_mu.reshape(x.size(0), self.num_classes, self.G, self.B)
+                weighted_blocks = y.unsqueeze(2).unsqueeze(3) * x_mm_blocks
+                delta_blocks = torch.einsum('bcgi,bcgj->cgij', weighted_blocks, x_mm_blocks)
+                self.Sigma = (self.c[:, None, None, None] * self.Sigma + delta_blocks) / (self.c[:, None, None, None] + sum_weights[:, None, None, None].clamp(min=1e-8))
 
+            self.overall_Sigma = torch.mean(self.Sigma, dim=0)
             self.mu = new_mu
             self.c = new_c
-            self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
-
-            mu_avg = self.mu.mean(dim=0)
-            x_centered = x.mean(dim=0) - mu_avg
-            proj = self.L.T @ x_centered
-            grad = torch.outer(x_centered, proj) - self.L @ torch.outer(proj, proj)
-            self.L += self.lr_oj * grad
 
     def update(self):
-        alpha = self.c / (self.c + self.tau)
-        sigma2_shrunk = (1 - alpha).unsqueeze(1) * self.sigma2_global.unsqueeze(0) + alpha.unsqueeze(1) * self.sigma2
-        self.precision = (1.0 / (sigma2_shrunk + self.epsilon)).half()
-        self.LM = (self.mu @ self.L).half()
+        reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
+        self.Lambda = torch.inverse(reg.double()).half()
 
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
-            M = self.mu.half()
-            W = self.precision * M
-            c = 0.5 * torch.sum(M * W, dim=1)
-            scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
+            M = self.mu.transpose(1, 0).half()
+            M_blocks = M.reshape(self.G, self.B, self.num_classes)
+            W_blocks = torch.matmul(self.Lambda, M_blocks)
+            c = 0.5 * torch.sum(torch.sum(M_blocks * W_blocks, dim=1), dim=0)
 
-            Lx = X.float() @ self.L
-            correction = torch.sum(Lx * self.LM.float(), dim=1) - 0.5 * torch.sum(self.LM.float() * self.LM.float(), dim=1)
-            scores = scores + correction.float()
-
+            X_blocks = X.half().reshape(1, self.G, self.B).permute(1, 0, 2).float()
+            scores = torch.bmm(X_blocks, W_blocks.float()).squeeze(1).sum(dim=0) - c
             return scores.float()
 
 def get_arguments():
