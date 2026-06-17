@@ -33,14 +33,18 @@ class DOTA(nn.Module):
         self.streaming_update_Sigma = streaming_update_Sigma
         self.epsilon = cfg['epsilon']
         self.tau = cfg.get('tau', 10000.0)
-        self.tau_act = cfg.get('tau_act', 50.0)
-        self.c_half = cfg.get('c_half', 50.0)
         self.top_k = cfg.get('top_k', None)
+        self.rank = cfg.get('rank', 8)
+        self.lr_oj = cfg.get('lr_oj', 0.01)
         self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
         self.sigma2 = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32).to(self.device)
         self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
         self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
+
+        self.L = torch.randn(input_shape, self.rank, dtype=torch.float32).to(self.device)
+        self.L /= torch.norm(self.L, dim=0, keepdim=True)
+        self.LM = torch.zeros(num_classes, self.rank, dtype=torch.float16).to(self.device)
 
     def fit(self, x, y):
         x = x.to(self.device)
@@ -68,12 +72,17 @@ class DOTA(nn.Module):
             self.c = new_c
             self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
+            mu_avg = self.mu.mean(dim=0)
+            x_centered = x.mean(dim=0) - mu_avg
+            proj = self.L.T @ x_centered
+            grad = torch.outer(x_centered, proj) - self.L @ torch.outer(proj, proj)
+            self.L += self.lr_oj * grad
+
     def update(self):
-        progress = torch.clamp(self.c / self.c_half, 0.0, 1.0)
-        tau_k = self.tau - (self.tau - self.tau_act) * progress
-        alpha = self.c / (self.c + tau_k)
+        alpha = self.c / (self.c + self.tau)
         sigma2_shrunk = (1 - alpha).unsqueeze(1) * self.sigma2_global.unsqueeze(0) + alpha.unsqueeze(1) * self.sigma2
         self.precision = (1.0 / (sigma2_shrunk + self.epsilon)).half()
+        self.LM = (self.mu @ self.L).half()
 
     def predict(self, X):
         X = X.to(self.device)
@@ -82,6 +91,11 @@ class DOTA(nn.Module):
             W = self.precision * M
             c = 0.5 * torch.sum(M * W, dim=1)
             scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
+
+            Lx = X.float() @ self.L
+            correction = torch.sum(Lx * self.LM.float(), dim=1) - 0.5 * torch.sum(self.LM.float() * self.LM.float(), dim=1)
+            scores = scores + correction.float()
+
             return scores.float()
 
 def get_arguments():
