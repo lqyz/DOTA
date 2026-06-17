@@ -6,5 +6,5 @@ eta: 0.4
 rho: 0.02
 tau: 10000.0
 top_k: 3
-max_drift: 0.1
-beta: 0.1
+tau_act: 50.0
+c_half: 50.0

@@ -1,4 +1,4 @@
-import random
+﻿import random
 import os
 
 import argparse
@@ -33,8 +33,6 @@ class DOTA(nn.Module):
         self.streaming_update_Sigma = streaming_update_Sigma
         self.epsilon = cfg['epsilon']
         self.tau = cfg.get('tau', 10000.0)
-        self.tau_act = cfg.get('tau_act', 50.0)
-        self.c_half = cfg.get('c_half', 50.0)
         self.top_k = cfg.get('top_k', None)
         self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
@@ -42,15 +40,37 @@ class DOTA(nn.Module):
         self.sigma2_global = cfg['sigma'] * torch.ones(input_shape, dtype=torch.float32).to(self.device)
         self.precision = (1.0 / (self.sigma2_global + self.epsilon)).unsqueeze(0).repeat(num_classes, 1).half()
 
+        self.gamma = cfg.get('gamma', 1.0)
+        self.channel_sum = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
+        self.channel_sum_sq = torch.zeros(input_shape, dtype=torch.float32).to(self.device)
+        self.channel_count = 0
+        self.channel_weights = torch.ones(input_shape, dtype=torch.float32).to(self.device)
+
     def fit(self, x, y):
-        x = x.to(self.device)
-        y = y.to(self.device)
+        x = x.float().to(self.device)
+        y = y.float().to(self.device)
         with torch.no_grad():
             if self.top_k is not None:
                 _, topk_idx = y.topk(self.top_k, dim=1)
                 y_filt = torch.zeros_like(y)
                 y_filt.scatter_(1, topk_idx, y.gather(1, topk_idx))
                 y = y_filt / y_filt.sum(dim=1, keepdim=True).clamp(min=1e-8)
+
+            current_sample = x.mean(0)
+            self.channel_count += 1
+            self.channel_sum += current_sample
+            self.channel_sum_sq += current_sample ** 2
+
+            if self.channel_count > 5:
+                global_mean = self.channel_sum / self.channel_count
+                global_var = (self.channel_sum_sq / self.channel_count) - (global_mean ** 2)
+                global_var = torch.clamp(global_var, min=1e-8)
+
+                relative_var = global_var / (global_var.median() + 1e-8)
+                self.channel_weights = torch.exp(-relative_var / self.gamma)
+                self.channel_weights = torch.clamp(self.channel_weights, min=0.1, max=1.0)
+
+            x = x * self.channel_weights.unsqueeze(0)
 
             sum_weights = torch.sum(y, dim=0)
             weighted_x = torch.matmul(y.T, x)
@@ -69,19 +89,19 @@ class DOTA(nn.Module):
             self.sigma2_global = torch.sum(self.c.unsqueeze(1) * self.sigma2, dim=0) / self.c.sum()
 
     def update(self):
-        progress = torch.clamp(self.c / self.c_half, 0.0, 1.0)
-        tau_k = self.tau - (self.tau - self.tau_act) * progress
-        alpha = self.c / (self.c + tau_k)
+        alpha = self.c / (self.c + self.tau)
         sigma2_shrunk = (1 - alpha).unsqueeze(1) * self.sigma2_global.unsqueeze(0) + alpha.unsqueeze(1) * self.sigma2
         self.precision = (1.0 / (sigma2_shrunk + self.epsilon)).half()
 
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
+            X_masked = X.half() * self.channel_weights.half().unsqueeze(0)
+
             M = self.mu.half()
             W = self.precision * M
             c = 0.5 * torch.sum(M * W, dim=1)
-            scores = torch.matmul(X.half(), W.T) - c.unsqueeze(0)
+            scores = torch.matmul(X_masked, W.T) - c.unsqueeze(0)
             return scores.float()
 
 def get_arguments():
