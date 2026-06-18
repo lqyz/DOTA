@@ -6,4 +6,5 @@ eta: 0.8
 rho: 0.03
 tau: 10000.0
 top_k: 5
-block_groups: 8
+rank: 4
+beta_ema: 0.01
