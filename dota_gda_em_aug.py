@@ -94,7 +94,11 @@ class DOTA(nn.Module):
         P_half = self.precision.float()
         e_k = P_half * self.mu
         a_k = e_k @ self.U
-        UTPU = self.U.T @ (P_half.unsqueeze(1) * self.U.unsqueeze(0))
+
+        U_T = self.U.T
+        P_weighted_U = P_half.unsqueeze(2) * self.U.unsqueeze(0)
+        U_T_batch = U_T.unsqueeze(0).expand(self.num_classes, -1, -1)
+        UTPU = torch.bmm(U_T_batch, P_weighted_U)
         M_k = torch.eye(self.rank, device=self.device).unsqueeze(0) + UTPU
         L_k = torch.linalg.cholesky(M_k)
         a_k_solved = torch.cholesky_solve(a_k.unsqueeze(2), L_k).squeeze(2)
