@@ -154,7 +154,7 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
             with torch.enable_grad():
                 feats_grad = bias_layer(feats_mean)
                 s = dota_model._predict_impl(feats_grad, use_grad=True)
-                entropy = -(s.softmax(1) * (s.softmax(1) + 1e-8).log()).sum()
+                entropy = -(s.unsqueeze(0).softmax(1) * (s.unsqueeze(0).softmax(1) + 1e-8).log()).sum()
             entropy.backward()
             bias_opt.step()
 
