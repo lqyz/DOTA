@@ -164,6 +164,7 @@ def build_test_data_loader(dataset_name, root_path, preprocess):
         test_loader = build_data_loader(data_source=dataset.test, batch_size=1, is_train=False, tfm=preprocess, shuffle=True)
 
     elif dataset_name in ['caltech101','dtd','eurosat','fgvc','food101','oxford_flowers','oxford_pets','stanford_cars','sun397','ucf101']:
+        preprocess = get_ood_preprocess()
         dataset = build_dataset(dataset_name, root_path)
         test_loader = build_data_loader(data_source=dataset.test, batch_size=1, is_train=False, tfm=preprocess, shuffle=True)
     
