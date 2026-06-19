@@ -39,13 +39,14 @@ class DOTA(nn.Module):
         if src_path is not None and os.path.exists(src_path):
             src = torch.load(src_path, map_location='cpu')
             self.mu = src['mu'].to(self.device)
-            sigma2_init = src['sigma2'].to(self.device)
+            sigma2_init = src['sigma2']
+            sigma2_blocks = sigma2_init.reshape(num_classes, self.G, self.B).mean(dim=2)
+            self.Sigma = sigma2_blocks.unsqueeze(2).unsqueeze(3) * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            self.Sigma = self.Sigma.to(self.device)
         else:
             self.mu = clip_weights.T.to(self.device)
-            sigma2_init = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32)
-
+            self.Sigma = cfg['sigma'] * torch.eye(self.B, dtype=torch.float32).repeat(num_classes, self.G, 1, 1).to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
-        self.Sigma = sigma2_init.unsqueeze(2).unsqueeze(3) * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).unsqueeze(1).repeat(num_classes, self.G, 1, 1).to(self.device)
         self.overall_Sigma = torch.mean(self.Sigma, dim=0)
         reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
         self.Lambda = torch.inverse(reg.double()).to(self.device).half()
