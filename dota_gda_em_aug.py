@@ -113,7 +113,7 @@ class BiasLayer(nn.Module):
         super().__init__()
         self.bias = nn.Parameter(torch.zeros(D))
     def forward(self, x):
-        x = x + self.bias
+        x = x.float() + self.bias
         return x / x.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
 def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
@@ -129,7 +129,7 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
             pred, target = torch.tensor(pred).cuda(), target.cuda()
 
             feats_mean = image_features.mean(0).unsqueeze(0)
-            dota_logits = dota_model.predict(bias_layer(feats_mean))
+            dota_logits = dota_model.predict(bias_layer(feats_mean).half())
 
             dota_weights = torch.clamp(params['rho'] * dota_model.c.mean() / image_features.size(0), max=params['eta'])
             final_logits = clip_logits + dota_weights*dota_logits
@@ -137,8 +137,7 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
             fusion_acc = cls_acc(final_logits, target)
             fusion_accuracies.append(fusion_acc)
 
-            biased_feats = bias_layer(image_features)
-            dota_model.fit(biased_feats, prob_map)
+            dota_model.fit(bias_layer(image_features).half(), prob_map)
             dota_model.update()
 
             if (i + 1) % recent_sample_count == 0:
