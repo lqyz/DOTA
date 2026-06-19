@@ -134,9 +134,12 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
                     )
                 )
 
+        final_acc = sum(fusion_accuracies) / len(fusion_accuracies)
+        recent_acc = sum(fusion_accuracies[-recent_sample_count:]) / min(recent_sample_count, len(fusion_accuracies))
+        tqdm.write(f"\n=== Final: {final_acc:.4f}% (recent: {recent_acc:.2f}%) ===")
         return {
-            'overall_fusion_accuracy': sum(fusion_accuracies) / len(fusion_accuracies),
-            'recent_fusion_accuracy': sum(fusion_accuracies[-recent_sample_count:]) / min(recent_sample_count, len(fusion_accuracies)),
+            'overall_fusion_accuracy': final_acc,
+            'recent_fusion_accuracy': recent_acc,
         }
 
 
