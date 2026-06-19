@@ -36,7 +36,7 @@ class DOTA(nn.Module):
         self.B = input_shape // self.G
         self.bias_lr = cfg.get('bias_lr', 0.001)
 
-        self.bias = nn.Parameter(torch.zeros(input_shape))
+        self.bias = nn.Parameter(torch.zeros(input_shape, device=self.device))
         self.bias_momentum = torch.zeros(input_shape).to(self.device)
 
         self.mu = clip_weights.T.to(self.device)
