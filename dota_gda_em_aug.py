@@ -108,7 +108,7 @@ class DOTA(nn.Module):
                 M_g = M[l:r, :]
                 W_g = torch.matmul(self.Lambda[g], M_g)
                 c_g = 0.5 * torch.sum(M_g * W_g, dim=0)
-                scores = scores + (X[:, l:r].half() @ W_g.float() - c_g.float())
+                scores = scores + (X[:, l:r].float() @ W_g.float() - c_g.float())
             return scores.float()
 
 def get_arguments():
