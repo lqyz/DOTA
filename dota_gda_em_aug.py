@@ -34,24 +34,24 @@ class DOTA(nn.Module):
         self.top_k = cfg.get('top_k', None)
         self.G = cfg.get('block_groups', 8)
         self.B = input_shape // self.G
-        self.bias_lr = cfg.get('bias_lr', 0.001)
 
-        self.bias = nn.Parameter(torch.zeros(input_shape, device=self.device))
-        self.bias_momentum = torch.zeros(input_shape).to(self.device)
+        src_path = cfg.get('src_stats', None)
+        if src_path is not None and os.path.exists(src_path):
+            src = torch.load(src_path, map_location='cpu')
+            self.mu = src['mu'].to(self.device)
+            sigma2_init = src['sigma2'].to(self.device)
+        else:
+            self.mu = clip_weights.T.to(self.device)
+            sigma2_init = cfg['sigma'] * torch.ones(num_classes, input_shape, dtype=torch.float32)
 
-        self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
-        self.Sigma = cfg['sigma'] * torch.eye(self.B, dtype=torch.float32).repeat(num_classes, self.G, 1, 1).to(self.device)
+        self.Sigma = sigma2_init.unsqueeze(2).unsqueeze(3) * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).unsqueeze(1).repeat(num_classes, self.G, 1, 1).to(self.device)
         self.overall_Sigma = torch.mean(self.Sigma, dim=0)
         reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
         self.Lambda = torch.inverse(reg.double()).to(self.device).half()
 
-    def apply_bias(self, x):
-        x = x + self.bias
-        return x / x.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-
     def fit(self, x, y):
-        x = self.apply_bias(x.to(self.device))
+        x = x.to(self.device)
         y = y.to(self.device)
         with torch.no_grad():
             if self.top_k is not None:
@@ -80,29 +80,8 @@ class DOTA(nn.Module):
         reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
         self.Lambda = torch.inverse(reg.double()).half()
 
-    def step_bias(self, image_features, clip_logits, dota_weight):
-        with torch.enable_grad():
-            X = image_features.mean(0).unsqueeze(0)
-            X_bias = self.apply_bias(X)
-            M = self.mu.transpose(1, 0).half()
-            M_blocks = M.reshape(self.G, self.B, self.num_classes)
-            W_blocks = torch.matmul(self.Lambda, M_blocks)
-            c = 0.5 * torch.sum(torch.sum(M_blocks * W_blocks, dim=1), dim=0)
-            X_blocks = X_bias.half().reshape(1, self.G, self.B).permute(1, 0, 2).float()
-            dota_grad = torch.bmm(X_blocks, W_blocks.float()).squeeze(1).sum(dim=0) - c
-
-            omega = min(dota_weight, 0.3)
-            final = clip_logits.detach() + omega * dota_grad
-            prob = final.softmax(dim=1)
-            entropy = -(prob * (prob + 1e-8).log()).sum(dim=1).mean()
-            self.bias.grad = None
-            entropy.backward()
-            if self.bias.grad is not None:
-                self.bias_momentum = 0.9 * self.bias_momentum + self.bias_lr * self.bias.grad
-                self.bias.data = self.bias.data - self.bias_momentum
-
     def predict(self, X):
-        X = self.apply_bias(X.to(self.device))
+        X = X.to(self.device)
         with torch.no_grad():
             M = self.mu.transpose(1, 0).half()
             M_blocks = M.reshape(self.G, self.B, self.num_classes)
@@ -136,12 +115,11 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
             dota_logits = dota_model.predict(image_features.mean(0).unsqueeze(0))
 
             dota_weights = torch.clamp(params['rho'] * dota_model.c.mean() / image_features.size(0), max=params['eta'])
-            final_logits = clip_logits + dota_weights * dota_logits
+            final_logits = clip_logits + dota_weights*dota_logits
 
             fusion_acc = cls_acc(final_logits, target)
             fusion_accuracies.append(fusion_acc)
 
-            dota_model.step_bias(image_features, clip_logits, dota_weights)
             dota_model.fit(image_features, prob_map)
             dota_model.update()
 
