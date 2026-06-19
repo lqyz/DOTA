@@ -80,15 +80,26 @@ class DOTA(nn.Module):
         reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
         self.Lambda = torch.inverse(reg.double()).half()
 
-    def step_bias(self, clip_logits, dota_logits, dota_weight):
-        omega = min(dota_weight, 0.3)
-        final = clip_logits.detach() + omega * dota_logits
-        prob = final.softmax(dim=1)
-        entropy = -(prob * (prob + 1e-8).log()).sum(dim=1).mean()
-        grad_bias = torch.autograd.grad(entropy, self.bias, retain_graph=False)[0]
-        if grad_bias is not None:
-            self.bias_momentum = 0.9 * self.bias_momentum + self.bias_lr * grad_bias
-            self.bias.data = self.bias.data - self.bias_momentum
+    def step_bias(self, image_features, clip_logits, dota_weight):
+        with torch.enable_grad():
+            X = image_features.mean(0).unsqueeze(0)
+            X_bias = self.apply_bias(X)
+            M = self.mu.transpose(1, 0).half()
+            M_blocks = M.reshape(self.G, self.B, self.num_classes)
+            W_blocks = torch.matmul(self.Lambda, M_blocks)
+            c = 0.5 * torch.sum(torch.sum(M_blocks * W_blocks, dim=1), dim=0)
+            X_blocks = X_bias.half().reshape(1, self.G, self.B).permute(1, 0, 2).float()
+            dota_grad = torch.bmm(X_blocks, W_blocks.float()).squeeze(1).sum(dim=0) - c
+
+            omega = min(dota_weight, 0.3)
+            final = clip_logits.detach() + omega * dota_grad
+            prob = final.softmax(dim=1)
+            entropy = -(prob * (prob + 1e-8).log()).sum(dim=1).mean()
+            self.bias.grad = None
+            entropy.backward()
+            if self.bias.grad is not None:
+                self.bias_momentum = 0.9 * self.bias_momentum + self.bias_lr * self.bias.grad
+                self.bias.data = self.bias.data - self.bias_momentum
 
     def predict(self, X):
         X = self.apply_bias(X.to(self.device))
@@ -130,7 +141,7 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
             fusion_acc = cls_acc(final_logits, target)
             fusion_accuracies.append(fusion_acc)
 
-            dota_model.step_bias(clip_logits, dota_logits, dota_weights)
+            dota_model.step_bias(image_features, clip_logits, dota_weights)
             dota_model.fit(image_features, prob_map)
             dota_model.update()
 
