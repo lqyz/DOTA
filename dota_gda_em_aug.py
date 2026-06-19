@@ -37,7 +37,7 @@ class DOTA(nn.Module):
         self.bias_lr = cfg.get('bias_lr', 0.001)
 
         self.bias = nn.Parameter(torch.zeros(input_shape))
-        self.bias_momentum = torch.zeros(input_shape)
+        self.bias_momentum = torch.zeros(input_shape).to(self.device)
 
         self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
@@ -87,8 +87,8 @@ class DOTA(nn.Module):
         entropy = -(prob * (prob + 1e-8).log()).sum(dim=1).mean()
         grad_bias = torch.autograd.grad(entropy, self.bias, retain_graph=False)[0]
         if grad_bias is not None:
-            self.bias_momentum = 0.9 * self.bias_momentum + self.bias_lr * grad_bias.cpu()
-            self.bias.data = self.bias.data - self.bias_momentum.to(self.device)
+            self.bias_momentum = 0.9 * self.bias_momentum + self.bias_lr * grad_bias
+            self.bias.data = self.bias.data - self.bias_momentum
 
     def predict(self, X):
         X = self.apply_bias(X.to(self.device))
