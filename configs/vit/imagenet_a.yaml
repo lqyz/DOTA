@@ -7,3 +7,4 @@ rho: 0.02
 tau: 10000.0
 top_k: 5
 block_groups: 8
+bias_lr: 0.001

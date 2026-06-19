@@ -9,8 +9,6 @@ import clip
 from utils import *
 from torch import nn
 import logging
-import bisect
-from sortedcontainers import SortedList
 import numpy as np
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
@@ -35,40 +33,25 @@ class DOTA(nn.Module):
         self.tau = cfg.get('tau', 10000.0)
         self.top_k = cfg.get('top_k', None)
         self.G = cfg.get('block_groups', 8)
+        self.B = input_shape // self.G
+        self.bias_lr = cfg.get('bias_lr', 0.001)
 
-        text_emb = clip_weights / clip_weights.norm(dim=0, keepdim=True).clamp(min=1e-8)
-        corr = text_emb @ text_emb.T
-        order = [0]
-        remaining = set(range(1, input_shape))
-        while remaining:
-            best = max(remaining, key=lambda i: abs(corr[order[-1], i].item()))
-            order.append(best)
-            remaining.remove(best)
-        self.perm = torch.tensor(order, dtype=torch.long).to(self.device)
+        self.bias = nn.Parameter(torch.zeros(input_shape))
+        self.bias_momentum = torch.zeros(input_shape)
 
-        sizes = input_shape // self.G
-        rem = input_shape % self.G
-        self.block_sizes = [sizes + 1 if i < rem else sizes for i in range(self.G)]
-        self.block_ranges = []
-        off = 0
-        for s in self.block_sizes:
-            self.block_ranges.append((off, off + s))
-            off += s
-
-        self.mu = clip_weights.T[:, self.perm].to(self.device)
+        self.mu = clip_weights.T.to(self.device)
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
+        self.Sigma = cfg['sigma'] * torch.eye(self.B, dtype=torch.float32).repeat(num_classes, self.G, 1, 1).to(self.device)
+        self.overall_Sigma = torch.mean(self.Sigma, dim=0)
+        reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
+        self.Lambda = torch.inverse(reg.double()).to(self.device).half()
 
-        self.Sigma = []
-        self.Lambda = []
-        for s in self.block_sizes:
-            Sig = cfg['sigma'] * torch.eye(s, dtype=torch.float32).repeat(num_classes, 1, 1).to(self.device)
-            self.Sigma.append(Sig)
-            overall = torch.mean(Sig, dim=0)
-            reg = (1 - self.epsilon) * overall + self.epsilon * torch.eye(s, dtype=torch.float32).to(self.device)
-            self.Lambda.append(torch.inverse(reg.double()).half())
+    def apply_bias(self, x):
+        x = x + self.bias
+        return x / x.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
     def fit(self, x, y):
-        x = x.to(self.device)[:, self.perm]
+        x = self.apply_bias(x.to(self.device))
         y = y.to(self.device)
         with torch.no_grad():
             if self.top_k is not None:
@@ -84,35 +67,43 @@ class DOTA(nn.Module):
 
             if self.streaming_update_Sigma:
                 x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
-                for g, (l, r) in enumerate(self.block_ranges):
-                    x_mm = x_minus_mu[..., l:r]
-                    w_mm = y.unsqueeze(2) * x_mm
-                    delta = torch.einsum('bci,bcj->cij', w_mm, x_mm)
-                    self.Sigma[g] = (self.c[:, None, None] * self.Sigma[g] + delta) / (self.c[:, None, None] + sum_weights[:, None, None].clamp(min=1e-8))
+                x_mm_blocks = x_minus_mu.reshape(x.size(0), self.num_classes, self.G, self.B)
+                weighted_blocks = y.unsqueeze(2).unsqueeze(3) * x_mm_blocks
+                delta_blocks = torch.einsum('bcgi,bcgj->cgij', weighted_blocks, x_mm_blocks)
+                self.Sigma = (self.c[:, None, None, None] * self.Sigma + delta_blocks) / (self.c[:, None, None, None] + sum_weights[:, None, None, None].clamp(min=1e-8))
 
+            self.overall_Sigma = torch.mean(self.Sigma, dim=0)
             self.mu = new_mu
             self.c = new_c
 
     def update(self):
-        for g in range(self.G):
-            overall = torch.mean(self.Sigma[g], dim=0)
-            reg = (1 - self.epsilon) * overall + self.epsilon * torch.eye(self.block_sizes[g], dtype=torch.float32).to(self.device)
-            self.Lambda[g] = torch.inverse(reg.double()).half()
+        reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
+        self.Lambda = torch.inverse(reg.double()).half()
+
+    def step_bias(self, clip_logits, dota_logits, dota_weight):
+        omega = min(dota_weight, 0.3)
+        final = clip_logits.detach() + omega * dota_logits
+        prob = final.softmax(dim=1)
+        entropy = -(prob * (prob + 1e-8).log()).sum(dim=1).mean()
+        grad_bias = torch.autograd.grad(entropy, self.bias, retain_graph=False)[0]
+        if grad_bias is not None:
+            self.bias_momentum = 0.9 * self.bias_momentum + self.bias_lr * grad_bias.cpu()
+            self.bias.data = self.bias.data - self.bias_momentum.to(self.device)
 
     def predict(self, X):
-        X = X.to(self.device)[:, self.perm]
+        X = self.apply_bias(X.to(self.device))
         with torch.no_grad():
             M = self.mu.transpose(1, 0).half()
-            scores = torch.zeros(1, self.num_classes, device=self.device, dtype=torch.float32)
-            for g, (l, r) in enumerate(self.block_ranges):
-                M_g = M[l:r, :]
-                W_g = torch.matmul(self.Lambda[g], M_g)
-                c_g = 0.5 * torch.sum(M_g * W_g, dim=0)
-                scores = scores + (X[:, l:r].float() @ W_g.float() - c_g.float())
+            M_blocks = M.reshape(self.G, self.B, self.num_classes)
+            W_blocks = torch.matmul(self.Lambda, M_blocks)
+            c = 0.5 * torch.sum(torch.sum(M_blocks * W_blocks, dim=1), dim=0)
+
+            X_blocks = X.half().reshape(1, self.G, self.B).permute(1, 0, 2).float()
+            scores = torch.bmm(X_blocks, W_blocks.float()).squeeze(1).sum(dim=0) - c
             return scores.float()
 
+
 def get_arguments():
-    """Get arguments of the test-time adaptation."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', dest='config', default='configs', help='settings of TDA on specific dataset in yaml format.')
     parser.add_argument('--datasets', dest='datasets', default='I', type=str, help="Datasets to process, separated by a slash (/). Example: I/A/V/R/S")
@@ -129,15 +120,17 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
     with torch.no_grad():
         for i, (images, target) in enumerate(tqdm(loader, desc='Processed test images: ')):
             image_features, clip_logits, loss, prob_map, pred = get_clip_logits_aug(images, clip_model, clip_weights)
-            pred, target, prop_entropy = torch.tensor(pred).cuda(), target.cuda(), get_entropy(loss, clip_weights)
+            pred, target = torch.tensor(pred).cuda(), target.cuda()
+
             dota_logits = dota_model.predict(image_features.mean(0).unsqueeze(0))
 
             dota_weights = torch.clamp(params['rho'] * dota_model.c.mean() / image_features.size(0), max=params['eta'])
-            final_logits = clip_logits + dota_weights*dota_logits
+            final_logits = clip_logits + dota_weights * dota_logits
 
             fusion_acc = cls_acc(final_logits, target)
             fusion_accuracies.append(fusion_acc)
 
+            dota_model.step_bias(clip_logits, dota_logits, dota_weights)
             dota_model.fit(image_features, prob_map)
             dota_model.update()
 
