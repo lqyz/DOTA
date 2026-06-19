@@ -34,6 +34,7 @@ class DOTA(nn.Module):
         self.top_k = cfg.get('top_k', None)
         self.G = cfg.get('block_groups', 8)
         self.B = input_shape // self.G
+        self.lf_gamma = cfg.get('lf_gamma', 0.0)
 
         src_path = cfg.get('src_stats', None)
         if src_path is not None and os.path.exists(src_path):
@@ -82,11 +83,8 @@ class DOTA(nn.Module):
         self.Lambda = torch.inverse(reg.double()).half()
 
     def predict(self, X):
-        return self._predict_impl(X, use_grad=False)
-
-    def _predict_impl(self, X, use_grad=False):
-        ctx = torch.enable_grad() if use_grad else torch.no_grad()
-        with ctx:
+        X = X.to(self.device)
+        with torch.no_grad():
             M = self.mu.transpose(1, 0).half()
             M_blocks = M.reshape(self.G, self.B, self.num_classes)
             W_blocks = torch.matmul(self.Lambda, M_blocks)
@@ -94,6 +92,11 @@ class DOTA(nn.Module):
 
             X_blocks = X.half().reshape(1, self.G, self.B).permute(1, 0, 2).float()
             scores = torch.bmm(X_blocks, W_blocks.float()).squeeze(1).sum(dim=0) - c
+
+            if self.lf_gamma > 0:
+                sum_x = X.float().sum(dim=-1)
+                sum_mu = self.mu.float().sum(dim=-1)
+                scores = scores + self.lf_gamma * (sum_x * sum_mu - 0.5 * sum_mu * sum_mu)
             return scores.float()
 
 
@@ -108,28 +111,15 @@ def get_arguments():
     return args
 
 
-class BiasLayer(nn.Module):
-    def __init__(self, D):
-        super().__init__()
-        self.bias = nn.Parameter(torch.zeros(D))
-    def forward(self, x):
-        x = x.float() + self.bias
-        return x / x.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-
 def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
     recent_sample_count = 1000
     fusion_accuracies = []
-    D = clip_weights.shape[0]
-    bias_layer = BiasLayer(D).cuda()
-    bias_opt = torch.optim.SGD(bias_layer.parameters(), lr=params.get('bias_lr', 0.001), momentum=0.9)
-
     with torch.no_grad():
         for i, (images, target) in enumerate(tqdm(loader, desc='Processed test images: ')):
             image_features, clip_logits, loss, prob_map, pred = get_clip_logits_aug(images, clip_model, clip_weights)
             pred, target = torch.tensor(pred).cuda(), target.cuda()
 
-            feats_mean = image_features.mean(0).unsqueeze(0)
-            dota_logits = dota_model.predict(bias_layer(feats_mean).half())
+            dota_logits = dota_model.predict(image_features.mean(0).unsqueeze(0))
 
             dota_weights = torch.clamp(params['rho'] * dota_model.c.mean() / image_features.size(0), max=params['eta'])
             final_logits = clip_logits + dota_weights*dota_logits
@@ -137,7 +127,7 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
             fusion_acc = cls_acc(final_logits, target)
             fusion_accuracies.append(fusion_acc)
 
-            dota_model.fit(bias_layer(image_features).half(), prob_map)
+            dota_model.fit(image_features, prob_map)
             dota_model.update()
 
             if (i + 1) % recent_sample_count == 0:
@@ -149,14 +139,6 @@ def run_test_dota(params, loader, clip_model, clip_weights, dota_model, logger):
                         sum(fusion_accuracies) / len(fusion_accuracies),
                     )
                 )
-
-            bias_opt.zero_grad()
-            with torch.enable_grad():
-                feats_grad = bias_layer(feats_mean)
-                s = dota_model._predict_impl(feats_grad, use_grad=True)
-                entropy = -(s.unsqueeze(0).softmax(1) * (s.unsqueeze(0).softmax(1) + 1e-8).log()).sum()
-            entropy.backward()
-            bias_opt.step()
 
         final_acc = sum(fusion_accuracies) / len(fusion_accuracies)
         recent_acc = sum(fusion_accuracies[-recent_sample_count:]) / min(recent_sample_count, len(fusion_accuracies))
