@@ -32,6 +32,7 @@ class DOTA(nn.Module):
         self.epsilon = cfg['epsilon']
         self.tau = cfg.get('tau', 10000.0)
         self.top_k = cfg.get('top_k', None)
+        self.conf_thr = cfg.get('conf_thr', None)
         self.G = cfg.get('block_groups', 8)
         self.B = cfg.get('block_size', 64)
         S = cfg.get('block_stride', 32)
@@ -60,6 +61,9 @@ class DOTA(nn.Module):
         x = x.to(self.device)
         y = y.to(self.device)
         with torch.no_grad():
+            if self.conf_thr is not None:
+                y = y * (y > self.conf_thr)
+                y = y / y.sum(dim=1, keepdim=True).clamp(min=1e-8)
             if self.top_k is not None:
                 _, topk_idx = y.topk(self.top_k, dim=1)
                 y_filt = torch.zeros_like(y)
