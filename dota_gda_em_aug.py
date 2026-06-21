@@ -33,24 +33,28 @@ class DOTA(nn.Module):
         self.tau = cfg.get('tau', 10000.0)
         self.top_k = cfg.get('top_k', None)
         self.G = cfg.get('block_groups', 8)
-        self.B = input_shape // self.G
-        self.lf_gamma = cfg.get('lf_gamma', 0.0)
+        self.B = cfg.get('block_size', 64)
+        S = cfg.get('block_stride', 32)
+        self.S = S
+        self.block_ranges = [(i, i + self.B) for i in range(0, input_shape - self.B + 1, S)]
+        self.n_blocks = len(self.block_ranges)
 
         src_path = cfg.get('src_stats', None)
         if src_path is not None and os.path.exists(src_path):
             src = torch.load(src_path, map_location='cpu')
             self.mu = src['mu'].to(self.device)
-            sigma2_init = src['sigma2']
-            sigma2_blocks = sigma2_init.reshape(num_classes, self.G, self.B).mean(dim=2)
-            self.Sigma = sigma2_blocks.unsqueeze(2).unsqueeze(3) * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-            self.Sigma = self.Sigma.to(self.device)
         else:
             self.mu = clip_weights.T.to(self.device)
-            self.Sigma = cfg['sigma'] * torch.eye(self.B, dtype=torch.float32).repeat(num_classes, self.G, 1, 1).to(self.device)
+
         self.c = torch.ones(num_classes, dtype=torch.float32).to(self.device)
-        self.overall_Sigma = torch.mean(self.Sigma, dim=0)
-        reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
-        self.Lambda = torch.inverse(reg.double()).to(self.device).half()
+        self.Sigma = []
+        self.Lambda = []
+        for l, r in self.block_ranges:
+            Sig = cfg['sigma'] * torch.eye(r - l, dtype=torch.float32).repeat(num_classes, 1, 1).to(self.device)
+            self.Sigma.append(Sig)
+            overall = Sig.mean(dim=0)
+            reg = (1 - self.epsilon) * overall + self.epsilon * torch.eye(r - l, dtype=torch.float32).to(self.device)
+            self.Lambda.append(torch.inverse(reg.double()).half())
 
     def fit(self, x, y):
         x = x.to(self.device)
@@ -69,35 +73,32 @@ class DOTA(nn.Module):
 
             if self.streaming_update_Sigma:
                 x_minus_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
-                x_mm_blocks = x_minus_mu.reshape(x.size(0), self.num_classes, self.G, self.B)
-                weighted_blocks = y.unsqueeze(2).unsqueeze(3) * x_mm_blocks
-                delta_blocks = torch.einsum('bcgi,bcgj->cgij', weighted_blocks, x_mm_blocks)
-                self.Sigma = (self.c[:, None, None, None] * self.Sigma + delta_blocks) / (self.c[:, None, None, None] + sum_weights[:, None, None, None].clamp(min=1e-8))
+                for g, (l, r) in enumerate(self.block_ranges):
+                    x_mm = x_minus_mu[..., l:r]
+                    w_mm = y.unsqueeze(2) * x_mm
+                    delta = torch.einsum('bci,bcj->cij', w_mm, x_mm)
+                    self.Sigma[g] = (self.c[:, None, None] * self.Sigma[g] + delta) / (self.c[:, None, None] + sum_weights[:, None, None].clamp(min=1e-8))
 
-            self.overall_Sigma = torch.mean(self.Sigma, dim=0)
             self.mu = new_mu
             self.c = new_c
 
     def update(self):
-        reg = (1 - self.epsilon) * self.overall_Sigma + self.epsilon * torch.eye(self.B, dtype=torch.float32).unsqueeze(0).to(self.device)
-        self.Lambda = torch.inverse(reg.double()).half()
+        for g in range(self.n_blocks):
+            overall = self.Sigma[g].mean(dim=0)
+            reg = (1 - self.epsilon) * overall + self.epsilon * torch.eye(self.block_ranges[g][1] - self.block_ranges[g][0], dtype=torch.float32).to(self.device)
+            self.Lambda[g] = torch.inverse(reg.double()).half()
 
     def predict(self, X):
         X = X.to(self.device)
         with torch.no_grad():
             M = self.mu.transpose(1, 0).half()
-            M_blocks = M.reshape(self.G, self.B, self.num_classes)
-            W_blocks = torch.matmul(self.Lambda, M_blocks)
-            c = 0.5 * torch.sum(torch.sum(M_blocks * W_blocks, dim=1), dim=0)
-
-            X_blocks = X.half().reshape(1, self.G, self.B).permute(1, 0, 2).float()
-            scores = torch.bmm(X_blocks, W_blocks.float()).squeeze(1).sum(dim=0) - c
-
-            if self.lf_gamma > 0:
-                sum_x = X.float().sum(dim=-1)
-                sum_mu = self.mu.float().sum(dim=-1)
-                scores = scores + self.lf_gamma * (sum_x * sum_mu - 0.5 * sum_mu * sum_mu)
-            return scores.float()
+            scores = torch.zeros(1, self.num_classes, device=self.device, dtype=torch.float32)
+            for g, (l, r) in enumerate(self.block_ranges):
+                M_g = M[l:r, :]
+                W_g = torch.matmul(self.Lambda[g], M_g.float())
+                c_g = 0.5 * torch.sum(M_g.float() * W_g, dim=0)
+                scores = scores + (X[:, l:r].float() @ W_g - c_g)
+            return (scores / max(1, self.B // self.S)).float()
 
 
 def get_arguments():

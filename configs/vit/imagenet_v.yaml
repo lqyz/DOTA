@@ -6,5 +6,6 @@ eta: 0.1
 rho: 0.01
 tau: 10000.0
 top_k: 5
-block_groups: 8
 bias_lr: 0.001
+block_size: 64
+block_stride: 32
