@@ -1,4 +1,4 @@
-"""v6 block-diagonal TTA on CIFAR-10-C with baseline comparison."""
+"""v6 block-diagonal + BN TTA on CIFAR-10-C."""
 import torch, torch.nn as nn, numpy as np, torchvision.transforms as T
 from tqdm import tqdm
 import os
@@ -51,26 +51,28 @@ def run_baseline(model, device, tf, path, labels):
         data = np.load(os.path.join(path, cname))
         correct = 0
         with torch.no_grad():
-            for i in tqdm(range(len(data)), desc=f'Base|{cname[:12]}', leave=False):
+            for i in tqdm(range(len(data)), desc=f'Base    |{cname[:12]}', leave=False):
                 img = tf(data[i]).unsqueeze(0).to(device)
                 correct += int(model(img).argmax(1).item() == labels[i])
         accs[cname.replace('.npy', '')] = 100 * correct / len(data)
     return accs
 
 
-def run_tta(model, device, tf, path, labels, G=4):
-    accs = {}
+def run_tta(model, device, tf, path, labels, G=4, adapt_bn=False):
+    if adapt_bn:
+        model.train()
     W = model.fc.weight.data
     b = model.fc.bias.data
     feats = {}
     model.avgpool.register_forward_hook(lambda m, i, o: feats.__setitem__('x', o.flatten(1)))
 
+    accs = {}
     corrs = sorted([f for f in os.listdir(path) if f.endswith('.npy') and f != 'labels.npy'])
     for cname in corrs:
         data = np.load(os.path.join(path, cname))
         cm = BlockDiagTTA(D=64, C=10, G=G, sigma=0.1, epsilon=0.0001, device=device)
         correct, omega = 0, 0.01
-        for i in tqdm(range(len(data)), desc=f'TTA |{cname[:12]}', leave=False):
+        for i in tqdm(range(len(data)), desc=f'TTA     |{cname[:12]}', leave=False):
             img = tf(data[i]).unsqueeze(0).to(device)
             with torch.no_grad():
                 _ = model(img)
@@ -79,8 +81,7 @@ def run_tta(model, device, tf, path, labels, G=4):
                 y = logits.softmax(1)
             ds = cm.predict(x)
             final = logits.cpu() + omega * ds.cpu()
-            pred = final.argmax(1).item()
-            correct += int(pred == labels[i])
+            correct += int(final.argmax(1).item() == labels[i])
             cm.fit(x, y)
             cm.update()
             omega = min(0.01 * cm.count.mean().item() / 10, 0.5)
@@ -90,33 +91,43 @@ def run_tta(model, device, tf, path, labels, G=4):
 
 if __name__ == '__main__':
     device = 'cuda'
-    model = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device).eval()
     tf = T.Compose([T.ToTensor(), T.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
     path = '/root/data/picture/CIFAR-10-C'
     labels = np.load(os.path.join(path, 'labels.npy'))
 
+    results = {}
+
     print("=== BASELINE (no adaptation) ===")
-    base = run_baseline(model, device, tf, path, labels)
-    base_avg = sum(base.values()) / len(base)
+    model = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device).eval()
+    results['Base'] = run_baseline(model, device, tf, path, labels)
 
-    print("\n=== v6 BLOCK-DIAG (G=4) ===")
-    tta = run_tta(model, device, tf, path, labels, G=4)
-    tta_avg = sum(tta.values()) / len(tta)
+    print("\n=== v6 BLOCK-DIAG (feature only) ===")
+    model2 = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device).eval()
+    results['BlockDiag'] = run_tta(model2, device, tf, path, labels, G=4)
 
-    print(f"\n{'Corruption':25s} {'Baseline':>8s} {'TTA':>8s} {'Delta':>8s}")
-    print("-" * 52)
-    for k in sorted(base.keys()):
-        d = tta.get(k, 0) - base.get(k, 0)
-        print(f"{k:25s} {base[k]:7.2f}% {tta[k]:7.2f}% {d:+8.2f}%")
-    print("-" * 52)
-    print(f"{'AVERAGE':25s} {base_avg:7.2f}% {tta_avg:7.2f}% {tta_avg - base_avg:+8.2f}%")
+    print("\n=== v6 + BN Adaptation ===")
+    import copy
+    model3 = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device)
+    results['BlockDiag+BN'] = run_tta(model3, device, tf, path, labels, G=4, adapt_bn=True)
 
-    with open('tta_cifar10c_results.txt', 'w') as f:
-        f.write(f"{'Corruption':25s} {'Baseline':>8s} {'TTA':>8s} {'Delta':>8s}\n")
-        f.write("-" * 52 + "\n")
-        for k in sorted(base.keys()):
-            d = tta.get(k, 0) - base.get(k, 0)
-            f.write(f"{k:25s} {base[k]:7.2f}% {tta[k]:7.2f}% {d:+8.2f}%\n")
-        f.write("-" * 52 + "\n")
-        f.write(f"{'AVERAGE':25s} {base_avg:7.2f}% {tta_avg:7.2f}% {tta_avg - base_avg:+8.2f}%\n")
-    print("Results saved to tta_cifar10c_results.txt")
+    # Print table
+    names = ['Base', 'BlockDiag', 'BlockDiag+BN']
+    base_k = sorted(results['Base'].keys())
+    print(f"\n{'Corruption':25s} {'Baseline':>8s} {'BlockDiag':>8s} {'+BN':>8s}")
+    print("-" * 53)
+    for k in base_k:
+        v = [results[n].get(k, 0) for n in names]
+        print(f"{k:25s} {v[0]:7.2f}% {v[1]:7.2f}% {v[2]:7.2f}%")
+    print("-" * 53)
+    avgs = [sum(results[n].values()) / len(results[n]) for n in names]
+    print(f"{'AVERAGE':25s} {avgs[0]:7.2f}% {avgs[1]:7.2f}% {avgs[2]:7.2f}%")
+
+    with open('tta_cifar10c_full.txt', 'w') as f:
+        f.write(f"{'Corruption':25s} {'Baseline':>8s} {'BlockDiag':>8s} {'+BN':>8s}\n")
+        f.write("-" * 53 + "\n")
+        for k in base_k:
+            v = [results[n].get(k, 0) for n in names]
+            f.write(f"{k:25s} {v[0]:7.2f}% {v[1]:7.2f}% {v[2]:7.2f}%\n")
+        f.write("-" * 53 + "\n")
+        f.write(f"{'AVERAGE':25s} {avgs[0]:7.2f}% {avgs[1]:7.2f}% {avgs[2]:7.2f}%\n")
+    print("Results saved to tta_cifar10c_full.txt")
