@@ -159,31 +159,27 @@ if __name__ == '__main__':
     results['BlockDiag'] = run_tta(model2, device, tf, path, labels, G=4)
 
     print("\n=== v6 + BN Adaptation ===")
+    import copy
     model3 = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device)
     results['BlockDiag+BN'] = run_tta(model3, device, tf, path, labels, G=4, adapt_bn=True)
 
-    print("\n=== FULL MATRIX (64x64) ===")
-    model4 = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device).eval()
-    results['FullMatrix'] = run_tta_full(model4, device, tf, path, labels, sigma=0.1)
-
-    # Print table
-    names = ['Base', 'BlockDiag', 'BlockDiag+BN', 'FullMatrix']
+    names = ['Base', 'BlockDiag', 'BlockDiag+BN']
     base_k = sorted(results['Base'].keys())
-    print(f"\n{'Corruption':25s} {'Base':>7s} {'BlockDiag':>9s} {'+BN':>11s} {'Full':>8s}")
-    print("-" * 65)
+    print(f"\n{'Corruption':25s} {'Baseline':>8s} {'BlockDiag':>9s} {'+BN':>9s}")
+    print("-" * 55)
     for k in base_k:
         v = [results[n].get(k, 0) for n in names]
-        print(f"{k:25s} {v[0]:6.2f}% {v[1]:8.2f}% {v[2]:10.2f}% {v[3]:7.2f}%")
-    print("-" * 65)
+        print(f"{k:25s} {v[0]:7.2f}% {v[1]:8.2f}% {v[2]:8.2f}%")
+    print("-" * 55)
     avgs = [sum(results[n].values()) / len(results[n]) for n in names]
-    print(f"{'AVERAGE':25s} {avgs[0]:6.2f}% {avgs[1]:8.2f}% {avgs[2]:10.2f}% {avgs[3]:7.2f}%")
+    print(f"{'AVERAGE':25s} {avgs[0]:7.2f}% {avgs[1]:8.2f}% {avgs[2]:8.2f}%")
 
     with open('tta_cifar10c_full.txt', 'w') as f:
-        f.write(f"{'Corruption':25s} {'Base':>7s} {'BlockDiag':>9s} {'+BN':>11s} {'Full':>8s}\n")
-        f.write("-" * 65 + "\n")
+        f.write(f"{'Corruption':25s} {'Baseline':>8s} {'BlockDiag':>9s} {'+BN':>9s}\n")
+        f.write("-" * 55 + "\n")
         for k in base_k:
             v = [results[n].get(k, 0) for n in names]
-            f.write(f"{k:25s} {v[0]:6.2f}% {v[1]:8.2f}% {v[2]:10.2f}% {v[3]:7.2f}%\n")
-        f.write("-" * 65 + "\n")
-        f.write(f"{'AVERAGE':25s} {avgs[0]:6.2f}% {avgs[1]:8.2f}% {avgs[2]:10.2f}% {avgs[3]:7.2f}%\n")
+            f.write(f"{k:25s} {v[0]:7.2f}% {v[1]:8.2f}% {v[2]:8.2f}%\n")
+        f.write("-" * 55 + "\n")
+        f.write(f"{'AVERAGE':25s} {avgs[0]:7.2f}% {avgs[1]:8.2f}% {avgs[2]:8.2f}%\n")
     print("Results saved to tta_cifar10c_full.txt")
