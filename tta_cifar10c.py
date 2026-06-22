@@ -110,3 +110,13 @@ if __name__ == '__main__':
         print(f"{k:25s} {base[k]:7.2f}% {tta[k]:7.2f}% {d:+8.2f}%")
     print("-" * 52)
     print(f"{'AVERAGE':25s} {base_avg:7.2f}% {tta_avg:7.2f}% {tta_avg - base_avg:+8.2f}%")
+
+    with open('tta_cifar10c_results.txt', 'w') as f:
+        f.write(f"{'Corruption':25s} {'Baseline':>8s} {'TTA':>8s} {'Delta':>8s}\n")
+        f.write("-" * 52 + "\n")
+        for k in sorted(base.keys()):
+            d = tta.get(k, 0) - base.get(k, 0)
+            f.write(f"{k:25s} {base[k]:7.2f}% {tta[k]:7.2f}% {d:+8.2f}%\n")
+        f.write("-" * 52 + "\n")
+        f.write(f"{'AVERAGE':25s} {base_avg:7.2f}% {tta_avg:7.2f}% {tta_avg - base_avg:+8.2f}%\n")
+    print("Results saved to tta_cifar10c_results.txt")
