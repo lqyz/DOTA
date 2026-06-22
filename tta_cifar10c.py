@@ -44,7 +44,60 @@ class BlockDiagTTA:
         return s
 
 
-def run_baseline(model, device, tf, path, labels):
+class FullMatrixTTA:
+    def __init__(self, D, C, sigma, epsilon, device):
+        self.C, self.D, self.device = C, D, device
+        self.eps = epsilon
+        self.mu = torch.zeros(C, D, device=device)
+        self.count = torch.ones(C, device=device)
+        self.Sigma = sigma * torch.eye(D, device=device).repeat(C, 1, 1)
+        self.Lambda = torch.inverse(sigma * torch.eye(D, device=device) + epsilon * torch.eye(D, device=device))
+
+    def fit(self, x, y):
+        x, y = x.float().to(self.device), y.float().to(self.device)
+        w = y.sum(0)
+        weighted_x = y.T @ x
+        self.mu = (weighted_x + self.count.unsqueeze(1) * self.mu) / (w.unsqueeze(1) + self.count.unsqueeze(1))
+        self.count = self.count + w
+        x_m_mu = x.unsqueeze(1) - self.mu.unsqueeze(0)
+        w_mm = y.unsqueeze(2) * x_m_mu
+        delta = torch.einsum('bci,bcj->cij', w_mm, x_m_mu)
+        self.Sigma = (self.count[:, None, None] * self.Sigma + delta) / (self.count[:, None, None] + w[:, None, None].clamp(1e-8))
+
+    def update(self):
+        overall = self.Sigma.mean(0)
+        reg = (1 - self.eps) * overall + self.eps * torch.eye(self.D, device=self.device)
+        self.Lambda = torch.inverse(reg)
+
+    def predict(self, x):
+        x = x.float().to(self.device)
+        M = self.mu.T
+        W = self.Lambda @ M
+        c = 0.5 * (M * W).sum(0)
+        return x @ W - c
+
+
+def run_tta_full(model, device, tf, path, labels, sigma=0.1):
+    accs = {}
+    W = model.fc.weight.data; b = model.fc.bias.data
+    feats = {}
+    model.avgpool.register_forward_hook(lambda m,i,o: feats.__setitem__('x', o.flatten(1)))
+    corrs = sorted([f for f in os.listdir(path) if f.endswith('.npy') and f != 'labels.npy'])
+    for cname in corrs:
+        data = np.load(os.path.join(path, cname))
+        cm = FullMatrixTTA(D=64, C=10, sigma=sigma, epsilon=0.0001, device=device)
+        correct, omega = 0, 0.01
+        for i in tqdm(range(len(data)), desc=f'Full    |{cname[:12]}', leave=False):
+            img = tf(data[i]).unsqueeze(0).to(device)
+            with torch.no_grad():
+                _ = model(img); x = feats['x']
+                logits = x @ W.T + b; y = logits.softmax(1)
+            ds = cm.predict(x)
+            correct += int((logits.cpu() + omega * ds.cpu()).argmax(1).item() == labels[i])
+            cm.fit(x, y); cm.update()
+            omega = min(0.01 * cm.count.mean().item() / 10, 0.5)
+        accs[cname.replace('.npy','')] = 100 * correct / len(data)
+    return accs
     accs = {}
     corrs = sorted([f for f in os.listdir(path) if f.endswith('.npy') and f != 'labels.npy'])
     for cname in corrs:
@@ -106,28 +159,31 @@ if __name__ == '__main__':
     results['BlockDiag'] = run_tta(model2, device, tf, path, labels, G=4)
 
     print("\n=== v6 + BN Adaptation ===")
-    import copy
     model3 = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device)
     results['BlockDiag+BN'] = run_tta(model3, device, tf, path, labels, G=4, adapt_bn=True)
 
+    print("\n=== FULL MATRIX (64x64) ===")
+    model4 = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True).to(device).eval()
+    results['FullMatrix'] = run_tta_full(model4, device, tf, path, labels, sigma=0.1)
+
     # Print table
-    names = ['Base', 'BlockDiag', 'BlockDiag+BN']
+    names = ['Base', 'BlockDiag', 'BlockDiag+BN', 'FullMatrix']
     base_k = sorted(results['Base'].keys())
-    print(f"\n{'Corruption':25s} {'Baseline':>8s} {'BlockDiag':>8s} {'+BN':>8s}")
-    print("-" * 53)
+    print(f"\n{'Corruption':25s} {'Base':>7s} {'BlockDiag':>9s} {'+BN':>11s} {'Full':>8s}")
+    print("-" * 65)
     for k in base_k:
         v = [results[n].get(k, 0) for n in names]
-        print(f"{k:25s} {v[0]:7.2f}% {v[1]:7.2f}% {v[2]:7.2f}%")
-    print("-" * 53)
+        print(f"{k:25s} {v[0]:6.2f}% {v[1]:8.2f}% {v[2]:10.2f}% {v[3]:7.2f}%")
+    print("-" * 65)
     avgs = [sum(results[n].values()) / len(results[n]) for n in names]
-    print(f"{'AVERAGE':25s} {avgs[0]:7.2f}% {avgs[1]:7.2f}% {avgs[2]:7.2f}%")
+    print(f"{'AVERAGE':25s} {avgs[0]:6.2f}% {avgs[1]:8.2f}% {avgs[2]:10.2f}% {avgs[3]:7.2f}%")
 
     with open('tta_cifar10c_full.txt', 'w') as f:
-        f.write(f"{'Corruption':25s} {'Baseline':>8s} {'BlockDiag':>8s} {'+BN':>8s}\n")
-        f.write("-" * 53 + "\n")
+        f.write(f"{'Corruption':25s} {'Base':>7s} {'BlockDiag':>9s} {'+BN':>11s} {'Full':>8s}\n")
+        f.write("-" * 65 + "\n")
         for k in base_k:
             v = [results[n].get(k, 0) for n in names]
-            f.write(f"{k:25s} {v[0]:7.2f}% {v[1]:7.2f}% {v[2]:7.2f}%\n")
-        f.write("-" * 53 + "\n")
-        f.write(f"{'AVERAGE':25s} {avgs[0]:7.2f}% {avgs[1]:7.2f}% {avgs[2]:7.2f}%\n")
+            f.write(f"{k:25s} {v[0]:6.2f}% {v[1]:8.2f}% {v[2]:10.2f}% {v[3]:7.2f}%\n")
+        f.write("-" * 65 + "\n")
+        f.write(f"{'AVERAGE':25s} {avgs[0]:6.2f}% {avgs[1]:8.2f}% {avgs[2]:10.2f}% {avgs[3]:7.2f}%\n")
     print("Results saved to tta_cifar10c_full.txt")
