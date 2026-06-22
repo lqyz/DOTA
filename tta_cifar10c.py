@@ -37,7 +37,7 @@ class BlockDiagTTA(nn.Module):
 
     def predict(self, x):
         x = x.float()
-        scores = torch.zeros(1, self.C)
+        scores = torch.zeros(1, self.C, device=x.device)
         for g, (l, r) in enumerate(self.block_ranges):
             M_g = self.mu[:, l:r].T
             W = self.Lambda[g] @ M_g
