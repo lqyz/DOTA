@@ -4,11 +4,12 @@ from tqdm import tqdm
 import os
 
 class BlockDiagTTA:
-    def __init__(self, D, C, G, sigma, epsilon, device):
+    def __init__(self, D, C, G, sigma, epsilon, alpha, device):
         self.D, self.C, self.G, self.device = D, C, G, device
         B = D // G
-        self.B, self.eps = B, epsilon
+        self.B, self.eps, self.alpha = B, epsilon, alpha
         self.mu = torch.zeros(C, D, device=device)
+        self.mu_env = torch.zeros(D, device=device) if alpha else None
         self.count = torch.ones(C, device=device)
         self.Sigma = [sigma * torch.eye(B, device=device).repeat(C, 1, 1) for _ in range(G)]
         self.Lambda = [torch.inverse(sigma * torch.eye(B, device=device) + epsilon * torch.eye(B, device=device)) for _ in range(G)]
@@ -16,6 +17,9 @@ class BlockDiagTTA:
 
     def fit(self, x, y):
         x, y = x.float().to(self.device), y.float().to(self.device)
+        if self.alpha:
+            self.mu_env = (1 - self.alpha) * self.mu_env + self.alpha * x.mean(0)
+            x = x - self.mu_env.unsqueeze(0)
         w = y.sum(0)
         weighted_x = y.T @ x
         self.mu = (weighted_x + self.count.unsqueeze(1) * self.mu) / (w.unsqueeze(1) + self.count.unsqueeze(1))
