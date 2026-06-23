@@ -48,7 +48,14 @@ tf = T.Compose([T.ToTensor(), T.Normalize((0.4914,0.4822,0.4465),(0.2023,0.1994,
 path = '/root/data/picture/CIFAR-10-C'
 labels = np.load(os.path.join(path, 'labels.npy'))
 
-def load_m(): return torch.hub.load("chenyaofo/pytorch-cifar-models","cifar10_resnet20",pretrained=True,force_reload=False).to(device)
+import copy
+resnet_base = torch.hub.load("chenyaofo/pytorch-cifar-models","cifar10_resnet20",pretrained=True,force_reload=False,skip_validation=True)
+state_dict = {k:v.clone() for k,v in resnet_base.state_dict().items()}
+
+def load_m():
+    m = torch.hub.load("chenyaofo/pytorch-cifar-models","cifar10_resnet20",pretrained=False,force_reload=False,skip_validation=True)
+    m.load_state_dict(state_dict)
+    return m.to(device)
 
 for cname in ['gaussian_noise.npy', 'glass_blur.npy']:
     data = np.load(os.path.join(path, cname))
