@@ -1,6 +1,4 @@
-"""Dual-Path Entropy Routing TTA for CIFAR-10-C.
-Reference: Decoupled TTA with self-routing dual-trajectory adaptation.
-"""
+"""Dual-Path Entropy Routing TTA with routing statistics."""
 import torch, numpy as np, torchvision.transforms as T, os, sys
 from tqdm import tqdm
 
@@ -49,28 +47,26 @@ class DecoupleBlockTTA:
 
 
 if __name__ == '__main__':
-    import torch, numpy as np, torchvision.transforms as T, os, sys
-    sys.path.insert(0, '/root/.cache/torch/hub/chenyaofo_pytorch-cifar-models_master')
-    from pytorch_cifar_models.resnet import cifar10_resnet20
-
     device = 'cuda'
-    tf = T.Compose([T.ToTensor(), T.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+    tf = T.Compose([T.ToTensor(), T.Normalize((0.4914,0.4822,0.4465),(0.2023,0.1994,0.2010))])
     path = '/root/data/picture/CIFAR-10-C'
     labels = np.load(os.path.join(path, 'labels.npy'))
-    sd = torch.load('/root/.cache/torch/hub/checkpoints/cifar10_resnet20-4118986f.pt', map_location='cpu')
-    sd = {k.replace('module.', ''): v for k, v in sd.items()}
+    sys.path.insert(0,'/root/.cache/torch/hub/chenyaofo_pytorch-cifar-models_master')
+    from pytorch_cifar_models.resnet import cifar10_resnet20
+    sd = torch.load('/root/.cache/torch/hub/checkpoints/cifar10_resnet20-4118986f.pt',map_location='cpu')
+    sd = {k.replace('module.',''):v for k,v in sd.items()}
 
-    results = {}
+    results, routes = {}, {}
     for fn in sorted([f for f in os.listdir(path) if f.endswith('.npy') and f != 'labels.npy']):
         data = np.load(os.path.join(path, fn))
         m = cifar10_resnet20(); m.load_state_dict(sd); m.to(device).eval()
         feats = {}
-        m.avgpool.register_forward_hook(lambda m, i, o: feats.__setitem__('x', o.flatten(1)))
+        m.avgpool.register_forward_hook(lambda m,i,o: feats.__setitem__('x', o.flatten(1)))
 
         cm_slow = DecoupleBlockTTA(D=64, C=10, G=4, sigma=0.1, epsilon=0.0001, alpha=0.1, device=device)
         cm_fast = DecoupleBlockTTA(D=64, C=10, G=4, sigma=0.1, epsilon=0.0001, alpha=0.5, device=device)
 
-        correct, omega = 0, 0.01
+        correct, omega, slow_wins, fast_wins = 0, 0.01, 0, 0
         with torch.no_grad():
             for i in tqdm(range(len(data)), desc=fn[:14], leave=False):
                 img = tf(data[i]).unsqueeze(0).to(device)
@@ -85,21 +81,27 @@ if __name__ == '__main__':
                 max_f = lgs_f.softmax(1).max(1)[0].item()
 
                 if max_s > max_f:
-                    winning_lgs = lgs_s
-                    winning_prob = lgs_s.softmax(1)
+                    slow_wins += 1; winning_lgs = lgs_s; winning_prob = lgs_s.softmax(1)
                 else:
-                    winning_lgs = lgs_f
-                    winning_prob = lgs_f.softmax(1)
+                    fast_wins += 1; winning_lgs = lgs_f; winning_prob = lgs_f.softmax(1)
 
                 correct += int(winning_lgs.argmax(1).item() == labels[i])
                 cm_slow.fit(x, winning_prob.to(device))
                 cm_fast.fit(x, winning_prob.to(device))
-
                 cm_slow.update(); cm_fast.update()
-                omega = min(0.01 * (cm_slow.count.mean().item() + cm_fast.count.mean().item()) / 20, 0.5)
+                omega = min(0.01 * cm_slow.count.mean().item() / 10, 0.5)
 
-        results[fn.replace('.npy', '')] = 100 * correct / len(data)
-        print(f'{fn[:14]}: {results[fn.replace(".npy","")]:.2f}%')
+        total = slow_wins + fast_wins
+        acc = 100 * correct / len(data)
+        sr = 100 * slow_wins / total
+        results[fn.replace('.npy','')] = acc
+        routes[fn.replace('.npy','')] = (sr, 100-sr)
+        print(f'{fn[:14]}: {acc:.2f}%  slow={sr:.0f}%  fast={100-sr:.0f}%')
 
     avg = sum(results.values()) / len(results)
-    print(f'\nAVERAGE: {avg:.2f}%')
+    print(f'\n{"Corruption":25s} {"Acc":>6s} {"Slow%":>6s} {"Fast%":>6s}')
+    print('-'*48)
+    for k in sorted(results.keys()):
+        sr, fr = routes[k]
+        print(f'{k:25s} {results[k]:5.2f}% {sr:5.0f}% {fr:5.0f}%')
+    print(f'{"AVERAGE":25s} {avg:5.2f}%')
