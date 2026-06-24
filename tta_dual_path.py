@@ -85,11 +85,15 @@ if __name__ == '__main__':
                 max_f = lgs_f.softmax(1).max(1)[0].item()
 
                 if max_s > max_f:
-                    correct += int(lgs_s.argmax(1).item() == labels[i])
-                    cm_slow.fit(x, lgs_s.softmax(1))
+                    winning_lgs = lgs_s
+                    winning_prob = lgs_s.softmax(1)
                 else:
-                    correct += int(lgs_f.argmax(1).item() == labels[i])
-                    cm_fast.fit(x, lgs_f.softmax(1))
+                    winning_lgs = lgs_f
+                    winning_prob = lgs_f.softmax(1)
+
+                correct += int(winning_lgs.argmax(1).item() == labels[i])
+                cm_slow.fit(x, winning_prob.to(device))
+                cm_fast.fit(x, winning_prob.to(device))
 
                 cm_slow.update(); cm_fast.update()
                 omega = min(0.01 * (cm_slow.count.mean().item() + cm_fast.count.mean().item()) / 20, 0.5)
