@@ -40,8 +40,8 @@ class DB:
 print('Building shuffled stream...')
 stream_imgs, stream_lbls, stream_names = [], [], []
 for fn in sorted([f for f in os.listdir(path) if f.endswith('.npy') and f!='labels.npy']):
-    data = np.load(os.path.join(path,fn))[:5000]
-    for i in range(5000):
+    data = np.load(os.path.join(path,fn))[:50000]
+    for i in range(50000):
         stream_imgs.append(data[i])
         stream_lbls.append(labels[i])
         stream_names.append(fn.replace('.npy',''))
