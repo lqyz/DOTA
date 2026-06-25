@@ -89,7 +89,7 @@ if __name__ == '__main__':
                 cm_slow.fit(x, winning_prob.to(device))
                 cm_fast.fit(x, winning_prob.to(device))
                 cm_slow.update(); cm_fast.update()
-                omega = min(0.01 * cm_slow.count.mean().item() / 10, 0.2)
+                omega = min(0.01 * cm_slow.count.mean().item() / 10, 0.5)
 
         total = slow_wins + fast_wins
         acc = 100 * correct / len(data)
