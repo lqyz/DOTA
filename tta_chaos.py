@@ -12,17 +12,18 @@ sd=torch.load('/root/.cache/torch/hub/checkpoints/cifar10_resnet20-4118986f.pt',
 sd={k.replace('module.',''):v for k,v in sd.items()}
 
 class DB:
-    def __init__(s,D,C,G,sigma,eps,alpha,device):
+    def __init__(s,D,C,G,sigma,eps,alpha,device,max_count=100.0):
         s.D,s.C,s.G,s.device=D,C,G,device;B=D//G;s.B,s.eps,s.alpha=B,eps,alpha
         s.mu=torch.zeros(C,D,device=device);s.mu_env=torch.zeros(D,device=device)
-        s.count=torch.ones(C,device=device)
+        s.count=torch.ones(C,device=device);s.max_count=max_count
         s.S=[sigma*torch.eye(B,device=device).repeat(C,1,1) for _ in range(G)]
         s.L=[torch.inverse(sigma*torch.eye(B,device=s.device)+eps*torch.eye(B,device=s.device)) for _ in range(G)]
         s.rng=[(i*B,(i+1)*B) for i in range(G)]
     def fit(s,x,y):
         x,y=x.float().to(s.device),y.float().to(s.device)
         s.mu_env=(1-s.alpha)*s.mu_env+s.alpha*x.mean(0);x=x-s.mu_env.unsqueeze(0)
-        w=y.sum(0);wx=y.T@x;s.mu=(wx+s.count.unsqueeze(1)*s.mu)/(w.unsqueeze(1)+s.count.unsqueeze(1));s.count+=w
+        w=y.sum(0);wx=y.T@x;s.mu=(wx+s.count.unsqueeze(1)*s.mu)/(w.unsqueeze(1)+s.count.unsqueeze(1))
+        s.count=(s.count+w).clamp(max=s.max_count)
         xmm=x.unsqueeze(1)-s.mu.unsqueeze(0)
         for g,(l,r) in enumerate(s.rng):
             wm=y.unsqueeze(2)*xmm[...,l:r];d=torch.einsum('bci,bcj->cij',wm,xmm[...,l:r])
@@ -58,7 +59,7 @@ print(f'Stream: {len(stream_imgs)} samples from {len(set(stream_names))} corrupt
 m=cifar10_resnet20();m.load_state_dict(sd);m.to(device).eval()
 f={};m.avgpool.register_forward_hook(lambda m,i,o:f.__setitem__('x',o.flatten(1)))
 
-cm_s=DB(64,10,4,0.1,0.0001,0.1,device);cm_f=DB(64,10,4,0.1,0.0001,0.5,device)
+cm_s=DB(64,10,4,0.1,0.0001,0.001,device,max_count=200.0);cm_f=DB(64,10,4,0.1,0.0001,0.005,device)
 c,w,sw,fw=0,0.01,0,0
 
 # Per-corruption accuracy tracking
