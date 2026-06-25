@@ -17,7 +17,7 @@ class DB:
         s.mu=torch.zeros(C,D,device=device);s.mu_env=torch.zeros(D,device=device)
         s.count=torch.ones(C,device=device)
         s.S=[sigma*torch.eye(B,device=device).repeat(C,1,1) for _ in range(G)]
-        s.L=[torch.inverse(sigma*torch.eye(B,device_device)+eps*torch.eye(B,device_device)) for _ in range(G)]
+        s.L=[torch.inverse(sigma*torch.eye(B,device=s.device)+eps*torch.eye(B,device=s.device)) for _ in range(G)]
         s.rng=[(i*B,(i+1)*B) for i in range(G)]
     def fit(s,x,y):
         x,y=x.float().to(s.device),y.float().to(s.device)
