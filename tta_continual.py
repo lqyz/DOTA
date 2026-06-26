@@ -36,10 +36,8 @@ class DB:
             M=s.mu[:,l:r].T;W=s.L[g]@M;sc+=xd[:,l:r]@W-0.5*(M*W).sum(0)
         return sc
 
-# 5 hardest corruptions by baseline degradation
-seq=[('gaussian_noise','gaussian_noise.npy'),('glass_blur','glass_blur.npy'),
-     ('shot_noise','shot_noise.npy'),('speckle_noise','speckle_noise.npy'),
-     ('impulse_noise','impulse_noise.npy')]
+# All 19 corruptions in order
+seq=[(f.replace('.npy',''),f) for f in sorted([f for f in os.listdir(path) if f.endswith('.npy') and f!='labels.npy'])]
 
 cm_s=DB(64,10,4,0.1,0.0001,0.002,device,max_count=100)
 cm_f=DB(64,10,4,0.1,0.0001,0.02,device,max_count=20)
