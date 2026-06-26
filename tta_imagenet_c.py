@@ -42,7 +42,7 @@ class ImgNetTTA:
         xd=x.float().to(s.device)-s.mu_env.unsqueeze(0);sc=torch.zeros(1,s.C,device=s.device)
         for g,(l,r) in enumerate(s.rng):
             M=s.mu[:,l:r].T;Wg=s.L[g]@M;sc+=xd[:,l:r]@Wg-0.5*(M*Wg).sum(0)
-        return sc
+        return sc/s.G
 
 root='/root/data/picture/ImageNet-C/brightness/5'
 folders=sorted(os.listdir(root))[:200]
@@ -69,8 +69,13 @@ with torch.no_grad():
         c0+=int(logits[0,list(range(C))].argmax(0).item()==labels[i])
 print(f'Baseline: {100*c0/len(imgs):.2f}%')
 
-# Dual-path
-c,sw,fw=0,0,0
+# Shuffle to prevent class-level semantic bias
+import random;random.seed(42)
+combined=list(zip(imgs,labels));random.shuffle(combined)
+imgs,labels=zip(*combined)
+
+# Dual-path with scaled omega
+c,sw,fw=0,0,0;w=0.002
 for i in tqdm(range(len(imgs)),desc='ImgNet-C'):
     img=tf(Image.open(imgs[i]).convert('RGB')).unsqueeze(0).to(device)
     with torch.no_grad():
@@ -83,5 +88,5 @@ for i in tqdm(range(len(imgs)),desc='ImgNet-C'):
     else:fw+=1;wl=lf;wp=lf.softmax(0)
     c+=int(wl.argmax(0).item()==labels[i])
     cm_s.fit(x,wp.to(device));cm_f.fit(x,wp.to(device));cm_s.update();cm_f.update()
-    w=min(0.01*100/10,0.2)
+    w=min(0.002*(i+1)/100,0.02)
 print(f'Dual-path: {100*c/len(imgs):.2f}%  slow={100*sw/(sw+fw):.0f}%')
