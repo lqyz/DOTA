@@ -45,8 +45,8 @@ print(f'Stream: {len(A)} samples')
 m=cifar10_resnet20();m.load_state_dict(sd);m.to(device).eval()
 f={};m.avgpool.register_forward_hook(lambda m,i,o:f.__setitem__('x',o.flatten(1)))
 
-cm_s=DB(64,10,4,0.1,0.0001,0.002,device,N_eff=50)
-cm_f=DB(64,10,4,0.1,0.0001,0.02,device,N_eff=10)
+cm_s=DB(64,10,4,0.1,0.0001,0.002,device,N_eff=100)
+cm_f=DB(64,10,4,0.1,0.0001,0.02,device,N_eff=20)
 c,w,sw,fw=0,0.01,0,0
 
 with torch.no_grad():
