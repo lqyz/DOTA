@@ -14,23 +14,26 @@ Usage:
 """
 
 import torch
+import numpy as np
 
 class DualPathTTA:
     def __init__(self, D, C, G=4, sigma=0.1, epsilon=1e-4,
                  alpha_slow=0.002, alpha_fast=0.02,
                  N_eff_slow=100, N_eff_fast=20,
-                 top_k=None, device='cuda'):
+                 soft_power=2.0, device='cuda'):
         self.device = device
         self.C = C
-        self._init_branch('slow', D, C, G, sigma, epsilon, alpha_slow, N_eff_slow, top_k)
-        self._init_branch('fast', D, C, G, sigma, epsilon, alpha_fast, N_eff_fast, top_k)
+        self.max_entropy = np.log(C)
+        self.soft_power = soft_power
+        self._init_branch('slow', D, C, G, sigma, epsilon, alpha_slow, N_eff_slow)
+        self._init_branch('fast', D, C, G, sigma, epsilon, alpha_fast, N_eff_fast)
         self.omega = 0.01
 
-    def _init_branch(self, name, D, C, G, sigma, epsilon, alpha, N_eff, top_k):
+    def _init_branch(self, name, D, C, G, sigma, epsilon, alpha, N_eff):
         B = D // G
         branch = {
             'D': D, 'C': C, 'G': G, 'B': B,
-            'alpha': alpha, 'N_eff': N_eff, 'top_k': top_k,
+            'alpha': alpha, 'N_eff': N_eff,
             'epsilon': epsilon,
             'mu': torch.zeros(C, D, device=self.device),
             'mu_env': torch.zeros(D, device=self.device),
@@ -40,22 +43,26 @@ class DualPathTTA:
         }
         setattr(self, name, branch)
 
+    def _soft_weight(self, y):
+        entropy = -(y * (y + 1e-8).log()).sum(-1)
+        return (1.0 - entropy / self.max_entropy).clamp(min=0.0).pow(self.soft_power)
+
     def _fit_branch(self, br, x, y):
-        x, y = x.float().to(self.device), y.float().to(self.device)
-        if br['top_k'] is not None:
-            _, idx = y.topk(br['top_k'], dim=1)
-            y_filt = torch.zeros_like(y); y_filt.scatter_(1, idx, y.gather(1, idx))
-            y = y_filt / y_filt.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        x = x.float().to(self.device)
+        gamma = self._soft_weight(y.to(self.device))
+        y_w = (gamma.unsqueeze(1) * y.to(self.device)).float()
+        if y_w.sum() < 1e-6:
+            return
 
         br['mu_env'] = (1 - br['alpha']) * br['mu_env'] + br['alpha'] * x.mean(0)
         x_dec = x - br['mu_env'].unsqueeze(0)
 
-        w = y.sum(0); wx = y.T @ x_dec; N = br['N_eff']
+        w = y_w.sum(0); wx = y_w.T @ x_dec; N = br['N_eff']
         br['mu'] = (wx + N * br['mu']) / (w.unsqueeze(1) + N)
 
         xmm = x_dec.unsqueeze(1) - br['mu'].unsqueeze(0)
         for g, (l, r) in enumerate(br['rng']):
-            wm = y.unsqueeze(2) * xmm[..., l:r]
+            wm = y_w.unsqueeze(2) * xmm[..., l:r]
             delta = torch.einsum('bci,bcj->cij', wm, xmm[..., l:r])
             br['Sigma'][g] = (N * br['Sigma'][g] + delta) / (N + w[:, None, None].clamp(1e-8))
 
@@ -74,13 +81,6 @@ class DualPathTTA:
         return sc
 
     def step(self, x, model_logits):
-        """
-        Args:
-            x: (1, D) feature vector from backbone
-            model_logits: (1, C) raw logits from model's FC layer
-        Returns:
-            final_logits: (1, C) DOTA-enhanced logits
-        """
         with torch.no_grad():
             sc_s = self._predict_branch(self.slow, x)
             sc_f = self._predict_branch(self.fast, x)
@@ -96,9 +96,8 @@ class DualPathTTA:
             else:
                 winning, wp = lf, lf.softmax(1)
 
-            y_fit = wp.to(self.device)
-            self._fit_branch(self.slow, x, y_fit)
-            self._fit_branch(self.fast, x, y_fit)
+            self._fit_branch(self.slow, x, wp)
+            self._fit_branch(self.fast, x, wp)
             self._update_branch(self.slow)
             self._update_branch(self.fast)
 
