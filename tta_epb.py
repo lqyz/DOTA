@@ -26,7 +26,7 @@ class EPB_TTA:
         xm=x.float().to(self.device).mean(0)
         dist=torch.norm(self.env_bank-xm.unsqueeze(0),dim=1)
         k=dist.argmin().item()
-        self.env_bank[k]=(1-self.s.alpha)*self.env_bank[k]+self.s.alpha*xm
+        self.env_bank[k]=(1-self.s['alpha'])*self.env_bank[k]+self.s['alpha']*xm
         return k,self.env_bank[k]
 
     def _fit_br(self,br,x,y,env):
