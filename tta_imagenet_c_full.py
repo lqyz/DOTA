@@ -52,31 +52,12 @@ for corr in corrs:
         for fname in os.listdir(os.path.join(root,folder))[:1]:
             imgs.append(os.path.join(root,folder,fname));labels.append(lbl)
     
-    # Baseline
+    # Baseline on ALL severities (same data as TTA)
     c0=0
     with torch.no_grad():
-        for i in range(len(imgs)):
-            img=tf(Image.open(imgs[i]).convert('RGB')).unsqueeze(0).to(device)
-            c0+=int(model(img)[0,list(range(C))].argmax(0).item()==labels[i])
-    
-    # Dual-path with all severities mixed
-    imgs_all,labels_all=[],[]
-    for sev_mix in ['1','2','3','4','5']:
-        for lbl,folder in enumerate(folders):
-            sp=f'{base_root}/{corr}/{sev_mix}/{folder}'
-            for fname in os.listdir(sp)[:1]:
-                imgs_all.append(sp.replace(folder,'')+folder+'/'+fname);labels_all.append(lbl)
-                imgs_all[-1]=os.path.join(sp,fname) # fix path
-    
-    # Rebuild with all sevs
-    imgs2,labels2=[],[]
-    for sev_mix in ['1','2','3','4','5']:
-        for lbl,folder in enumerate(folders):
-            sp=f'{base_root}/{corr}/{sev_mix}/{folder}'
-            for fname in os.listdir(sp)[:1]:
-                imgs2.append(os.path.join(sp,fname));labels2.append(lbl)
-    
-    random.seed(42);combined=list(zip(imgs2,labels2));random.shuffle(combined);imgs2,labels2=zip(*combined)
+        for i in range(len(imgs2)):
+            img=tf(Image.open(imgs2[i]).convert('RGB')).unsqueeze(0).to(device)
+            c0+=int(model(img)[0,list(range(C))].argmax(0).item()==labels2[i])
     
     cm_s=ImgNetTTA(C,D,G,0.1,0.0001,0.002,device,N_eff=100,W_init=W_sub)
     cm_f=ImgNetTTA(C,D,G,0.1,0.0001,0.02,device,N_eff=20,W_init=W_sub)
