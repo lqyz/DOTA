@@ -1,4 +1,4 @@
-"""BD-TTA Level 3: ImageNet-C 1000-class, 3 hardest corruptions (Sev5)."""
+"""BD-TTA: ImageNet-C 1000-class, 3 hardest corruptions (Sev5)."""
 import torch, torchvision, numpy as np, os, random, sys
 from tqdm import tqdm
 from PIL import Image
@@ -44,6 +44,7 @@ for i in tqdm(range(len(imgs)),desc='BD-TTA',leave=False):
     if ms>mf:sw+=1;wl=ls
     else:fw+=1;wl=lf
     c+=int(wl.argmax(0).item()==labels[i])
-    tta._fit_branch(tta.slow,x);tta._fit_branch(tta.fast,x);tta._update_branch(tta.slow);tta._update_branch(tta.fast)
+    tta._fit_branch(tta.slow,x);tta._fit_branch(tta.fast,x)
+    tta._update_branch(tta.slow);tta._update_branch(tta.fast)
 tta_acc=100*c/len(imgs);print(f'BD-TTA: {tta_acc:.2f}%  slow={100*sw/(sw+fw):.0f}%')
 np.save('/root/DOTA/result_imagenet_c.npy',{'baseline':baseline,'tta':tta_acc})
