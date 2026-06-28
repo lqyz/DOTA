@@ -14,8 +14,8 @@ sd={k.replace('module.',''):v for k,v in sd.items()}
 
 A,B=[],[]
 for fn in sorted([f for f in os.listdir(path) if f.endswith('.npy') and f!='labels.npy']):
-    d=np.load(os.path.join(path,fn))[:5000]
-    for i in range(5000):A.append(d[i]);B.append(labels[i])
+    d=np.load(os.path.join(path,fn))[45000:50000]
+    for i in range(5000):A.append(d[i]);B.append(labels[5000+i])
 idx=list(range(len(A)));random.shuffle(idx)
 A=[A[i]for i in idx];B=[B[i]for i in idx]
 print(f'Chaos stream: {len(A)} samples')
