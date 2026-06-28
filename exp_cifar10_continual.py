@@ -20,6 +20,7 @@ m=cifar10_resnet20();m.load_state_dict(sd);m.to(device).eval()
 feats={};m.avgpool.register_forward_hook(lambda m,i,o:feats.__setitem__('x',o.flatten(1)))
 
 for ph,(fn,name) in enumerate([(fn,fn.replace('.npy','')) for fn in corrs]):
+    tta.reset()  # Clear env bias from previous phase
     data=np.load(os.path.join(path,fn))[45000:50000]
     c0=0;c=0
     with torch.no_grad():
