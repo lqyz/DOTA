@@ -18,7 +18,7 @@ sys.path.insert(0,'/root/DOTA')
 from bdtta import BDTTA
 
 base='/root/data/picture/ImageNet-C'
-corrs=['gaussian_noise','shot_noise','glass_blur'];sev='5'
+corrs=sorted([d for d in os.listdir(base) if os.path.isdir(os.path.join(base,d)) and len(os.listdir(os.path.join(base,d)))>1])
 imgs,labels=[],[]
 for corr in corrs:
     ds=datasets.ImageFolder(f'{base}/{corr}/{sev}')
